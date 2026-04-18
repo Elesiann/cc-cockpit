@@ -1,0 +1,7 @@
+{
+  "name": "demo",
+  "repos": {
+    "alpha": "alpha",
+    "beta": "beta"
+  }
+}

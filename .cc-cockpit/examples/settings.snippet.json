@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "SessionStart":      [{"hooks":[{"type":"command","command":"/home/YOUR_USER/.local/bin/cc-cockpit hook SessionStart"}]}],
+    "UserPromptSubmit":  [{"hooks":[{"type":"command","command":"/home/YOUR_USER/.local/bin/cc-cockpit hook UserPromptSubmit"}]}],
+    "PermissionRequest": [{"hooks":[{"type":"command","command":"/home/YOUR_USER/.local/bin/cc-cockpit hook PermissionRequest"}]}],
+    "Notification":      [{"matcher":"idle_prompt|permission_prompt","hooks":[{"type":"command","command":"/home/YOUR_USER/.local/bin/cc-cockpit hook Notification"}]}],
+    "PostToolUse":       [{"hooks":[{"type":"command","command":"/home/YOUR_USER/.local/bin/cc-cockpit hook PostToolUse"}]}],
+    "Stop":              [{"hooks":[{"type":"command","command":"/home/YOUR_USER/.local/bin/cc-cockpit hook Stop"}]}],
+    "SessionEnd":        [{"hooks":[{"type":"command","command":"/home/YOUR_USER/.local/bin/cc-cockpit hook SessionEnd"}]}]
+  }
+}
