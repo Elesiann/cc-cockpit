@@ -1,0 +1,13 @@
+layout {
+    pane split_direction="vertical" {
+        pane size=60 borderless=false {
+            name "cc-cockpit dashboard"
+            command "bash"
+            args "-c" "exec \"$CC_COCKPIT_HOME/dashboard.sh\""
+        }
+        pane {
+            name "control"
+            command "bash"
+        }
+    }
+}
