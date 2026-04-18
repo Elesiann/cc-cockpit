@@ -7,15 +7,17 @@ CUR="${1:-}"
 
 WS="${COCKPIT_WORKSPACE_NAME:-?}"
 
-# Header + counts
+# Header + counts (+ dropped_events warning if any)
 jq -r --arg ws "$WS" '
-  .sessions // {} | to_entries as $s
+  . as $root
+  | (.sessions // {} | to_entries) as $s
   | ($s | map(select(.value.status != "ended")) | length) as $active
   | ($s | map(select(.value.status == "running")) | length) as $running
   | ($s | map(select(.value.status == "waiting_input")) | length) as $waiting
   | ($s | map(select(.value.status == "idle")) | length) as $idle
   | ($s | map(select(.value.status == "ended")) | length) as $ended
-  | "─── cc-cockpit · \($ws) ───  active=\($active) (running=\($running) waiting=\($waiting) idle=\($idle))  ended=\($ended) ───"
+  | ($root.dropped_events // 0) as $dropped
+  | "─── cc-cockpit · \($ws) ───  active=\($active) (running=\($running) waiting=\($waiting) idle=\($idle))  ended=\($ended)\(if $dropped > 0 then "  ⚠ dropped=\($dropped)" else "" end) ───"
 ' "$CUR"
 echo
 
