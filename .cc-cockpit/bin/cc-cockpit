@@ -1,0 +1,291 @@
+#!/bin/bash
+# cc-cockpit — v1 MVP (single-binary dispatch)
+#
+# Subcommands:
+#   open                   — detect workspace.json, init state, launch Zellij
+#   spawn --repo X --task  — create new pane running Claude in repo X
+#   hook <EventName>       — internal: read stdin payload, append event
+#   --version              — print version
+
+set -u
+VERSION="0.1.0-mvp"
+
+# Resolve install root (dir containing reduce-state.sh, dashboard.sh, layouts/).
+# Follows symlinks so ~/.local/bin/cc-cockpit -> ~/cc-cockpit-dev/.cc-cockpit/bin/cc-cockpit works.
+__bin_real="$(readlink -f "${BASH_SOURCE[0]}")"
+CC_COCKPIT_INSTALL_HOME="$(dirname "$(dirname "$__bin_real")")"
+
+die() { echo "cc-cockpit: $*" >&2; exit 2; }
+
+# ---------- workspace discovery ----------
+find_workspace() {
+  local d="$PWD"
+  while [ "$d" != "/" ]; do
+    if [ -f "$d/.cc-cockpit/workspace.json" ]; then
+      echo "$d"
+      return 0
+    fi
+    d="$(dirname "$d")"
+  done
+  return 1
+}
+
+# ---------- shared: append event under flock ----------
+# $1 = event JSON (without seq / wall_clock_iso8601)
+append_event() {
+  local ev="$1"
+  [ -n "${COCKPIT_STATE_HOME:-}" ] || return 0
+  mkdir -p "$COCKPIT_STATE_HOME"
+  local lock="$COCKPIT_STATE_HOME/events.lock"
+  local counter="$COCKPIT_STATE_HOME/seq.counter"
+  local log="$COCKPIT_STATE_HOME/events.jsonl"
+  (
+    flock -x 9
+    local seq=$(( $(cat "$counter" 2>/dev/null || echo 0) + 1 ))
+    echo "$seq" > "$counter"
+    local ts
+    ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    jq -c \
+      --argjson seq "$seq" \
+      --arg ts "$ts" \
+      '. + {seq: $seq, wall_clock_iso8601: $ts}' \
+      <<< "$ev" >> "$log"
+  ) 9>"$lock"
+}
+
+# ============================================================
+# cmd: open
+# ============================================================
+cmd_open() {
+  local ws
+  ws="$(find_workspace)" || die "Not in a cc-cockpit workspace. Expected .cc-cockpit/workspace.json up the directory tree."
+
+  local name
+  name="$(jq -r '.name' "$ws/.cc-cockpit/workspace.json")"
+  [ -n "$name" ] && [ "$name" != "null" ] || die "workspace.json missing 'name'"
+
+  local state_home="${XDG_STATE_HOME:-$HOME/.local/state}/cc-cockpit/$name"
+  mkdir -p "$state_home"
+  [ -f "$state_home/seq.counter" ] || echo 0 > "$state_home/seq.counter"
+  [ -f "$state_home/events.jsonl" ] || touch "$state_home/events.jsonl"
+
+  command -v zellij >/dev/null || die "zellij not found on PATH"
+
+  export CC_COCKPIT_HOME="$CC_COCKPIT_INSTALL_HOME"
+  export COCKPIT_STATE_HOME="$state_home"
+  export COCKPIT_WORKSPACE_NAME="$name"
+  export CC_COCKPIT_WORKSPACE_ROOT="$ws"
+
+  echo "cc-cockpit: workspace=$name  state=$state_home  home=$CC_COCKPIT_HOME"
+  exec zellij --layout "$CC_COCKPIT_HOME/layouts/initial.kdl"
+}
+
+# ============================================================
+# cmd: spawn
+# ============================================================
+cmd_spawn() {
+  local repo="" task="" related=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo)    repo="$2"; shift 2 ;;
+      --task)    task="$2"; shift 2 ;;
+      --related) related="$2"; shift 2 ;;
+      *) die "spawn: unknown flag '$1'" ;;
+    esac
+  done
+  [ -n "$repo" ] || die "spawn: --repo required"
+  [ -n "$task" ] || die "spawn: --task required"
+  [ -n "${ZELLIJ:-}" ] || die "spawn: must be run inside a Zellij session (launched by 'cc-cockpit open')"
+  [ -n "${CC_COCKPIT_HOME:-}" ] || die "spawn: CC_COCKPIT_HOME not set — run 'cc-cockpit open' first"
+  [ -n "${COCKPIT_STATE_HOME:-}" ] || die "spawn: COCKPIT_STATE_HOME not set"
+  [ -n "${CC_COCKPIT_WORKSPACE_ROOT:-}" ] || die "spawn: CC_COCKPIT_WORKSPACE_ROOT not set"
+
+  local ws_json="$CC_COCKPIT_WORKSPACE_ROOT/.cc-cockpit/workspace.json"
+  local rel
+  rel="$(jq -r --arg k "$repo" '.repos[$k] // empty' "$ws_json")"
+  if [ -z "$rel" ]; then
+    local valid
+    valid="$(jq -r '.repos | keys | join(", ")' "$ws_json")"
+    die "spawn: unknown repo '$repo'. Valid: $valid"
+  fi
+  local abs="$CC_COCKPIT_WORKSPACE_ROOT/$rel"
+  [ -d "$abs" ] || die "spawn: repo dir does not exist: $abs"
+
+  command -v claude >/dev/null || die "spawn: 'claude' not found on PATH"
+
+  local pane_name="${repo}: ${task}"
+  # Truncate pane name to something reasonable
+  pane_name="${pane_name:0:60}"
+
+  zellij action new-pane --direction right --cwd "$abs" --name "$pane_name" -- \
+    env \
+      COCKPIT_SESSION_ACTIVE=1 \
+      COCKPIT_STATE_HOME="$COCKPIT_STATE_HOME" \
+      CC_COCKPIT_HOME="$CC_COCKPIT_HOME" \
+      COCKPIT_WORKSPACE_NAME="$COCKPIT_WORKSPACE_NAME" \
+      COCKPIT_PRIMARY_REPO="$repo" \
+      COCKPIT_DECLARED_RELATED_REPOS="$related" \
+      COCKPIT_TASK_NAME="$task" \
+      claude
+}
+
+# ============================================================
+# cmd: mark-ended (operator utility — dismiss stale sessions)
+# ============================================================
+cmd_mark_ended() {
+  local prefix="${1:-}"
+  [ -n "$prefix" ] || die "mark-ended: need <session_id-prefix> (or 'all-non-ended')"
+  [ -n "${COCKPIT_STATE_HOME:-}" ] || die "mark-ended: COCKPIT_STATE_HOME not set (run inside 'cc-cockpit open')"
+
+  local log="$COCKPIT_STATE_HOME/events.jsonl"
+  [ -f "$log" ] || die "no events.jsonl in $COCKPIT_STATE_HOME"
+
+  # Collect session_ids whose latest status is not ended
+  local current="$COCKPIT_STATE_HOME/current.json"
+  [ -f "$current" ] || die "no current.json yet (wait for dashboard tick)"
+
+  local targets
+  if [ "$prefix" = "all-non-ended" ]; then
+    targets="$(jq -r '.sessions | to_entries[] | select(.value.status != "ended") | .key' "$current")"
+  else
+    targets="$(jq -r --arg p "$prefix" \
+      '.sessions | to_entries[] | select(.value.status != "ended" and (.key | startswith($p))) | .key' \
+      "$current")"
+  fi
+
+  if [ -z "$targets" ]; then
+    echo "mark-ended: no matching non-ended sessions for '$prefix'"
+    return 0
+  fi
+
+  local count=0
+  while IFS= read -r sid; do
+    [ -n "$sid" ] || continue
+    local ev
+    ev="$(jq -n --arg sid "$sid" --arg et "SessionEnd" \
+      '{event_type:$et, session_id:$sid, payload:{synthetic:true, reason:"operator-dismissed"}}')"
+    append_event "$ev"
+    echo "  ended: $sid"
+    count=$((count+1))
+  done <<< "$targets"
+  echo "mark-ended: $count session(s) dismissed."
+}
+
+# ============================================================
+# cmd: hook
+# ============================================================
+cmd_hook() {
+  local event="${1:-}"
+  [ -n "$event" ] || exit 0
+
+  # Guard: silent no-op outside a cockpit-spawned session
+  [ "${COCKPIT_SESSION_ACTIVE:-}" = "1" ] || exit 0
+  [ -n "${COCKPIT_STATE_HOME:-}" ] || exit 0
+  mkdir -p "$COCKPIT_STATE_HOME"
+
+  local payload
+  payload="$(cat)"
+  local sid
+  sid="$(jq -r '.session_id // empty' <<< "$payload" 2>/dev/null)"
+  [ -n "$sid" ] || exit 0
+
+  local ev='{}'
+  case "$event" in
+    SessionStart)
+      ev="$(jq -n \
+        --arg sid "$sid" \
+        --arg et  "SessionStart" \
+        --arg repo "${COCKPIT_PRIMARY_REPO:-}" \
+        --arg related "${COCKPIT_DECLARED_RELATED_REPOS:-}" \
+        --arg task "${COCKPIT_TASK_NAME:-}" \
+        --arg pane "${ZELLIJ_PANE_ID:-}" \
+        --argjson payload "$payload" \
+        '{
+          event_type: $et,
+          session_id: $sid,
+          payload: {
+            primary_repo: $repo,
+            declared_related_repos: ($related | split(",") | map(select(length>0))),
+            task_name: $task,
+            cwd: ($payload.cwd // null),
+            zellij_pane_id: (if $pane=="" then null else $pane end),
+            source: ($payload.source // null),
+            model: ($payload.model // null)
+          }
+        }')"
+      ;;
+    UserPromptSubmit)
+      local preview
+      preview="$(jq -r '.prompt // ""' <<< "$payload" | tr '\n' ' ' | cut -c1-80)"
+      ev="$(jq -n \
+        --arg sid "$sid" --arg et "UserPromptSubmit" --arg p "$preview" \
+        '{event_type:$et, session_id:$sid, payload:{prompt_preview:$p}}')"
+      ;;
+    PermissionRequest)
+      ev="$(jq -n --arg sid "$sid" --arg et "PermissionRequest" \
+        '{event_type:$et, session_id:$sid, payload:{}}')"
+      ;;
+    Notification)
+      local ntype
+      ntype="$(jq -r '.notification_type // ""' <<< "$payload")"
+      # Only admit idle_prompt / permission_prompt — these genuinely require operator attention
+      case "$ntype" in
+        idle_prompt|permission_prompt) ;;
+        *) exit 0 ;;
+      esac
+      ev="$(jq -n --arg sid "$sid" --arg et "Notification" --arg nt "$ntype" \
+        '{event_type:$et, session_id:$sid, payload:{notification_type:$nt}}')"
+      ;;
+    PostToolUse)
+      local tool
+      tool="$(jq -r '.tool_name // ""' <<< "$payload")"
+      ev="$(jq -n --arg sid "$sid" --arg et "PostToolUse" --arg t "$tool" \
+        '{event_type:$et, session_id:$sid, payload:{tool_name:$t, success:true}}')"
+      ;;
+    Stop)
+      ev="$(jq -n --arg sid "$sid" --arg et "Stop" \
+        '{event_type:$et, session_id:$sid, payload:{}}')"
+      ;;
+    SessionEnd)
+      ev="$(jq -n --arg sid "$sid" --arg et "SessionEnd" \
+        '{event_type:$et, session_id:$sid, payload:{}}')"
+      ;;
+    *) exit 0 ;;
+  esac
+
+  append_event "$ev"
+}
+
+# ============================================================
+# dispatch
+# ============================================================
+case "${1:-}" in
+  --version|-v) echo "cc-cockpit $VERSION" ;;
+  open)         shift; cmd_open "$@" ;;
+  spawn)        shift; cmd_spawn "$@" ;;
+  mark-ended)   shift; cmd_mark_ended "$@" ;;
+  hook)         shift; cmd_hook "$@" ;;
+  help|--help|"") cat <<EOF
+cc-cockpit $VERSION
+
+Usage:
+  cc-cockpit open
+      Detect .cc-cockpit/workspace.json up from cwd, init state, launch Zellij.
+
+  cc-cockpit spawn --repo <key> --task "<text>" [--related A,B]
+      (run from a Zellij pane inside 'open') Create a new pane running Claude
+      in the repo referenced by <key> in workspace.json.
+
+  cc-cockpit mark-ended <sid-prefix | all-non-ended>
+      Append a synthetic SessionEnd for stale sessions (no SessionEnd emitted,
+      e.g. after a terminal crash). Takes a session_id prefix or 'all-non-ended'.
+
+  cc-cockpit hook <EventName>
+      Internal — invoked from ~/.claude/settings.json hooks. Reads payload
+      from stdin and appends an event to events.jsonl.
+
+  cc-cockpit --version
+EOF
+  ;;
+  *) die "unknown subcommand '$1' (try: cc-cockpit --help)" ;;
+esac
