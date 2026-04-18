@@ -7,6 +7,8 @@ seq.counter
 current.json
 current.json.tmp
 frame.txt
+last_bell_seq
+workspace_root
 
 # M0 spike — never commit raw Claude Code payloads
 raw-payloads/

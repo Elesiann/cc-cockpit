@@ -145,11 +145,12 @@ mkdir -p ~/my-workspace/packages/api ~/my-workspace/packages/web ~/my-workspace/
 
 **Rules about `workspace.json`:**
 
-- `name` is the runtime state dir key. Pick something stable — renaming it orphans the previous state.
+- `name` is the runtime state dir key. It must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (no slashes, no `..`). Pick something stable — renaming it orphans the previous state.
+- If two different workspace directories declare the same `name`, the second `cc-cockpit open` fails with a clear error. State binds to the **canonical path** of the workspace root on first open and rejects mismatches on subsequent opens. No silent cross-workspace contamination.
 - Keys in `repos` are **short labels** you type in `--repo` (`api`, `web`, ...), not filesystem paths.
-- Values are **relative paths** from the workspace parent to each child repo.
-- Children are **real git repos** — their `.git/` stays theirs. The parent never becomes a super-repo.
-- You can have multiple workspaces; they don't conflict (state is keyed by `name`).
+- Values are **relative paths** from the workspace parent to each child repo. Paths that resolve outside the workspace root (e.g. `../sibling`) are rejected at `spawn` time.
+- Children must be **real git repos** — `spawn` verifies `git -C <child> rev-parse --git-dir` and refuses to start Claude anywhere else.
+- You can have multiple workspaces with different `name`s; they don't conflict.
 
 ---
 
@@ -240,7 +241,7 @@ Everything else is consequences of those five points.
 
 **Dashboard shows ghost sessions from a previous Zellij** — runtime state persists across Zellij restarts (by design — it's event-sourced). Use `cc-cockpit mark-ended <prefix>` to dismiss.
 
-**Bell didn't fire even though I saw Claude asking for permission** — in `permission_mode: "auto"`, Claude auto-approves and the `Notification` fires transiently. Status flickers `running → waiting_input → running` inside one 0.5s tick, so the dashboard may not visually catch it, but the bell IS emitted on the transition. To sustain `waiting_input`, press `Shift+Tab` in the Claude pane to cycle out of auto mode.
+**Bell didn't fire even though I saw Claude asking for permission** — in `permission_mode: "auto"`, Claude auto-approves and the `Notification` fires transiently. The **visible status** may never enter `waiting_input` because the reducer collapses `Notification → PostToolUse` inside one 0.5s tick. The **bell still fires**, because it's driven by new event sequence numbers (any new `Notification`/`PermissionRequest` event), not by the reduced state. To sustain `waiting_input` in the dashboard, press `Shift+Tab` in the Claude pane to cycle out of auto mode.
 
 **Terminal header of Claude pane looks weird** — the spawn command is `env COCKPIT_... claude`, and the terminal title shows the argv. Pane name (in the Zellij border) IS set correctly via `--name "<repo>: <task>"`; the header text inside Claude's own UI is a claude-side concern.
 
@@ -255,6 +256,12 @@ rm -rf ~/.local/state/cc-cockpit/<workspace-name>/
 **Inspect raw events:**
 ```bash
 jq -c . ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl | less -R
+```
+
+**Dashboard shows `⚠ dropped=N` in the header** — the reducer skipped N malformed lines in `events.jsonl` (truncated writes, disk-full mid-append, manual edits). The rest of the log was processed normally. To investigate, grep for non-JSON lines:
+```bash
+while IFS= read -r line; do echo "$line" | jq . >/dev/null 2>&1 || echo "BAD: $line"; done \
+  < ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl
 ```
 
 ---
@@ -295,9 +302,11 @@ Most are on the v1.1/v1.5 roadmap.
 $XDG_STATE_HOME/cc-cockpit/<name>/     ← runtime state (never committed)
 ├── events.jsonl                       ← append-only event log
 ├── events.snapshot.jsonl              ← dashboard-local copy (under flock -s)
-├── current.json                       ← reducer output
+├── current.json                       ← reducer output (+ dropped_events count)
 ├── seq.counter                        ← global monotonic counter (under flock -x)
-└── events.lock                        ← flock target
+├── events.lock                        ← flock target
+├── last_bell_seq                      ← dashboard's bell checkpoint (event-delta)
+└── workspace_root                     ← canonical workspace path this state binds to
 ```
 
 ---
