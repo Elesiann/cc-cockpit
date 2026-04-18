@@ -131,8 +131,24 @@ cmd_spawn() {
     valid="$(jq -r '.repos | keys | join(", ")' "$ws_json")"
     die "spawn: unknown repo '$repo'. Valid: $valid"
   fi
-  local abs="$CC_COCKPIT_WORKSPACE_ROOT/$rel"
+
+  # Resolve + enforce containment. workspace.json values may be ../foo, absolute paths, or
+  # symlinks — we canonicalize and require strict descendant of the canonical workspace root.
+  local ws_root abs
+  ws_root="$(realpath -- "$CC_COCKPIT_WORKSPACE_ROOT")" || die "spawn: cannot canonicalize workspace root"
+  abs="$(realpath -m -- "$CC_COCKPIT_WORKSPACE_ROOT/$rel")"
+  case "$abs/" in
+    "$ws_root"/?*/) : ;;
+    *) die "spawn: repo '$repo' resolves outside workspace root.
+    resolved: $abs
+    workspace: $ws_root" ;;
+  esac
   [ -d "$abs" ] || die "spawn: repo dir does not exist: $abs"
+
+  # Enforce "child repo is a real git repo" invariant.
+  if ! git -C "$abs" rev-parse --git-dir >/dev/null 2>&1; then
+    die "spawn: '$abs' is not a git repo. cc-cockpit only spawns in real child repos (run 'git init' there if you meant to)."
+  fi
 
   command -v claude >/dev/null || die "spawn: 'claude' not found on PATH"
 
