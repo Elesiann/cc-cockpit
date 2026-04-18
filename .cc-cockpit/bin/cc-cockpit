@@ -60,12 +60,35 @@ cmd_open() {
   local ws
   ws="$(find_workspace)" || die "Not in a cc-cockpit workspace. Expected .cc-cockpit/workspace.json up the directory tree."
 
+  # Canonicalize workspace root — state binds to this exact path.
+  local ws_canonical
+  ws_canonical="$(realpath -- "$ws")" || die "cannot canonicalize workspace path: $ws"
+
   local name
   name="$(jq -r '.name' "$ws/.cc-cockpit/workspace.json")"
   [ -n "$name" ] && [ "$name" != "null" ] || die "workspace.json missing 'name'"
 
+  # Validate name as a safe slug — no path components, no traversal, must start alnum.
+  if [[ ! "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+    die "invalid workspace name '$name' — must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*\$ (no slashes, no '..')"
+  fi
+
   local state_home="${XDG_STATE_HOME:-$HOME/.local/state}/cc-cockpit/$name"
+
+  # Bind name ↔ canonical root. Reject silent collisions between unrelated dirs that happen
+  # to share 'name'. If state already exists, the persisted root must match this one.
+  if [ -f "$state_home/workspace_root" ]; then
+    local persisted
+    persisted="$(cat "$state_home/workspace_root")"
+    if [ "$persisted" != "$ws_canonical" ]; then
+      die "workspace name '$name' is already bound to '$persisted' (current is '$ws_canonical').
+    Rename the workspace (change 'name' in .cc-cockpit/workspace.json) or remove the stale
+    state dir: rm -rf '$state_home'"
+    fi
+  fi
+
   mkdir -p "$state_home"
+  [ -f "$state_home/workspace_root" ] || echo "$ws_canonical" > "$state_home/workspace_root"
   [ -f "$state_home/seq.counter" ] || echo 0 > "$state_home/seq.counter"
   [ -f "$state_home/events.jsonl" ] || touch "$state_home/events.jsonl"
 
@@ -74,7 +97,7 @@ cmd_open() {
   export CC_COCKPIT_HOME="$CC_COCKPIT_INSTALL_HOME"
   export COCKPIT_STATE_HOME="$state_home"
   export COCKPIT_WORKSPACE_NAME="$name"
-  export CC_COCKPIT_WORKSPACE_ROOT="$ws"
+  export CC_COCKPIT_WORKSPACE_ROOT="$ws_canonical"
 
   echo "cc-cockpit: workspace=$name  state=$state_home  home=$CC_COCKPIT_HOME"
   exec zellij --layout "$CC_COCKPIT_HOME/layouts/initial.kdl"
