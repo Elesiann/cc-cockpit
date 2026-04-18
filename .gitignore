@@ -1,0 +1,23 @@
+# Runtime state (lives under $XDG_STATE_HOME, not here — belt & suspenders)
+state/
+events.jsonl
+events.snapshot.jsonl
+events.lock
+seq.counter
+current.json
+current.json.tmp
+frame.txt
+
+# M0 spike — never commit raw Claude Code payloads
+raw-payloads/
+
+# Child workspaces created during local testing
+/ws-*/
+/demo-*/
+/scratch/
+
+# Editors / OS noise
+.DS_Store
+*.swp
+*.bak
+*.bak-*
