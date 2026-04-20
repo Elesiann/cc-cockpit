@@ -74,23 +74,28 @@ cmd_open() {
   fi
 
   local state_home="${XDG_STATE_HOME:-$HOME/.local/state}/cc-cockpit/$name"
+  mkdir -p "$state_home"
 
-  # Bind name ↔ canonical root. Reject silent collisions between unrelated dirs that happen
-  # to share 'name'. If state already exists, the persisted root must match this one.
-  if [ -f "$state_home/workspace_root" ]; then
-    local persisted
-    persisted="$(cat "$state_home/workspace_root")"
-    if [ "$persisted" != "$ws_canonical" ]; then
-      die "workspace name '$name' is already bound to '$persisted' (current is '$ws_canonical').
+  # Bind name ↔ canonical root under an init lock. The check-and-write of
+  # workspace_root, seq.counter, and events.jsonl must be atomic — otherwise two
+  # unrelated directories with the same 'name' opening concurrently could both
+  # observe "no binding" and initialize the same state dir.
+  {
+    flock -x 200
+    if [ -f "$state_home/workspace_root" ]; then
+      local persisted
+      persisted="$(cat "$state_home/workspace_root")"
+      if [ "$persisted" != "$ws_canonical" ]; then
+        die "workspace name '$name' is already bound to '$persisted' (current is '$ws_canonical').
     Rename the workspace (change 'name' in .cc-cockpit/workspace.json) or remove the stale
     state dir: rm -rf '$state_home'"
+      fi
+    else
+      echo "$ws_canonical" > "$state_home/workspace_root"
     fi
-  fi
-
-  mkdir -p "$state_home"
-  [ -f "$state_home/workspace_root" ] || echo "$ws_canonical" > "$state_home/workspace_root"
-  [ -f "$state_home/seq.counter" ] || echo 0 > "$state_home/seq.counter"
-  [ -f "$state_home/events.jsonl" ] || touch "$state_home/events.jsonl"
+    [ -f "$state_home/seq.counter" ] || echo 0 > "$state_home/seq.counter"
+    [ -f "$state_home/events.jsonl" ] || touch "$state_home/events.jsonl"
+  } 200>"$state_home/init.lock"
 
   command -v zellij >/dev/null || die "zellij not found on PATH"
 
