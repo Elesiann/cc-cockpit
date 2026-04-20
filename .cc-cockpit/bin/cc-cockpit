@@ -177,8 +177,17 @@ cmd_spawn() {
 # cmd: mark-ended (operator utility — dismiss stale sessions)
 # ============================================================
 cmd_mark_ended() {
-  local prefix="${1:-}"
-  [ -n "$prefix" ] || die "mark-ended: need <session_id-prefix> (or 'all-non-ended')"
+  local prefix="" yes_flag=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --yes|-y) yes_flag=1; shift ;;
+      -*) die "mark-ended: unknown flag '$1'" ;;
+      *)
+        [ -z "$prefix" ] || die "mark-ended: only one positional argument expected"
+        prefix="$1"; shift ;;
+    esac
+  done
+  [ -n "$prefix" ] || die "mark-ended: need <session_id-prefix> (or 'all-non-ended') [--yes]"
   [ -n "${COCKPIT_STATE_HOME:-}" ] || die "mark-ended: COCKPIT_STATE_HOME not set (run inside 'cc-cockpit open')"
 
   local log="$COCKPIT_STATE_HOME/events.jsonl"
@@ -202,17 +211,30 @@ cmd_mark_ended() {
     return 0
   fi
 
-  local count=0
+  local count
+  count="$(printf '%s\n' "$targets" | grep -c . || true)"
+
+  # Defensive: require --yes when dismissing more than one session, since
+  # mark-ended acts on a possibly-stale snapshot. A synthetic SessionEnd is
+  # revivable (any later event from the live session will un-dismiss), but
+  # noisy confirmation is still cheaper than silent batch-kill.
+  if [ "$count" -gt 1 ] && [ "$yes_flag" -ne 1 ]; then
+    echo "mark-ended: would dismiss $count session(s):" >&2
+    printf '  - %s\n' $targets >&2
+    die "re-run with --yes to confirm (or give a more specific prefix)"
+  fi
+
+  local dismissed=0
   while IFS= read -r sid; do
     [ -n "$sid" ] || continue
     local ev
     ev="$(jq -n --arg sid "$sid" --arg et "SessionEnd" \
       '{event_type:$et, session_id:$sid, payload:{synthetic:true, reason:"operator-dismissed"}}')"
     append_event "$ev"
-    echo "  ended: $sid"
-    count=$((count+1))
+    echo "  dismissed: $sid"
+    dismissed=$((dismissed+1))
   done <<< "$targets"
-  echo "mark-ended: $count session(s) dismissed."
+  echo "mark-ended: $dismissed session(s) dismissed (any later event from a live session will un-dismiss)."
 }
 
 # ============================================================
