@@ -23,3 +23,9 @@ raw-payloads/
 *.swp
 *.bak
 *.bak-*
+
+# Dashboard stage stderr capture files (runtime only)
+snapshot.err
+reduce.err
+render.err
+cockpit.live.lock
