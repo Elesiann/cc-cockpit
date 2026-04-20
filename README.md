@@ -190,9 +190,10 @@ A 3rd pane opens to the right with Claude running in the chosen repo. Dashboard 
 **Dismiss a stale session** (e.g. after a crash where `SessionEnd` never fired):
 ```bash
 cc-cockpit mark-ended <sid-prefix>
-# or nuclear
-cc-cockpit mark-ended all-non-ended
+# matches >1 session? --yes required:
+cc-cockpit mark-ended all-non-ended --yes
 ```
+Dismissal is non-terminal: if the matched session turns out to still be live, the next event it emits will un-dismiss it and it reappears in the active table.
 
 ---
 
@@ -202,8 +203,8 @@ cc-cockpit mark-ended all-non-ended
 |---|---|
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. Silent `exec zellij` → all subsequent work happens in that Zellij. |
 | `cc-cockpit spawn --repo <key> --task "<text>"` | Open a new Zellij pane to the right running Claude in `repos[<key>]`. Run from inside the Zellij (control pane). |
-| `cc-cockpit mark-ended <sid-prefix>` | Append a synthetic `SessionEnd` for stale sessions. Takes a prefix of `session_id` or the literal `all-non-ended`. |
-| `cc-cockpit mark-ended all-non-ended` | Dismiss every currently non-ended session (after a full Zellij restart, for instance). |
+| `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **non-terminal**: if the session was actually still live, any later event from it (prompt, tool use, notification) un-dismisses it. Prefixes that match more than one session require `--yes`. |
+| `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session (e.g. after a full Zellij restart). `--yes` required because this always matches multiple sessions. |
 | `cc-cockpit hook <Event>` | **Internal.** Called from `~/.claude/settings.json`. Do not invoke by hand. |
 | `cc-cockpit --version` | Print version. |
 | `cc-cockpit --help` | Short usage. |
@@ -228,6 +229,8 @@ cc-cockpit mark-ended all-non-ended
 5. There is no daemon. No IPC. No database. If the dashboard dies, `events.jsonl` keeps growing; on restart, the reducer reconstructs everything.
 
 Everything else is consequences of those five points.
+
+**Ordering assumption** — within a single Claude Code session, hooks fire serially: the `claude` process waits for each hook to exit before proceeding to the next one. So for any given `session_id`, `seq` order matches emission order. Across sessions the flock serializes appends but the reducer operates on disjoint per-session state, so cross-session races don't matter. If Claude Code ever introduces concurrent hooks within one session, the reducer would need a source-side ordering field in the payload.
 
 ---
 
