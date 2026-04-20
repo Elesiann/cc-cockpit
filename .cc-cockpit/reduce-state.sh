@@ -4,6 +4,20 @@
 # Robust to malformed lines: uses line-oriented parsing with `fromjson?` so a
 # single truncated / corrupted record doesn't poison the whole reducer. Invalid
 # lines are counted in `dropped_events` (top-level sibling of `sessions`).
+#
+# Ordering assumption: within a single Claude Code session, hooks fire serially
+# (the claude process waits for each hook's exit before proceeding), so for any
+# session_id the seq order matches emission order. Across sessions, hook
+# invocations may race on the append flock, but they touch disjoint session_id
+# state so cross-session interleaving is safe. If Claude Code ever introduces
+# concurrent hooks within one session, a source-side ordering field would be
+# needed in the payload.
+#
+# Dismissal semantics: a `SessionEnd` event with payload.synthetic=true marks
+# the session as dismissed (e.g. via `cc-cockpit mark-ended`). Any later event
+# for that session un-dismisses it, so a still-live session that was matched
+# by a stale prefix will come back as soon as it emits anything. Real (non-
+# synthetic) SessionEnd remains terminal.
 set -u
 
 jq -R -s '
@@ -16,6 +30,19 @@ jq -R -s '
       | reduce .[] as $e (
           {sessions: {}, last_seq: 0};
           .last_seq = ($e.seq // .last_seq)
+          # Pre-revive: if the session was dismissed (synthetic SessionEnd) and
+          # any non-SessionEnd event arrives, un-end it before applying that
+          # event. The event-specific branch below then sets the correct status.
+          | (if (.sessions[$e.session_id] // null) != null
+                and (.sessions[$e.session_id].dismissed // false) == true
+                and $e.event_type != "SessionEnd" then
+               .sessions[$e.session_id] |= (
+                 .status = "running"
+                 | .dismissed = false
+                 | .revived_at = $e.wall_clock_iso8601
+                 | .ended_at = null
+               )
+             else . end)
           | if $e.event_type == "SessionStart" then
               if .sessions[$e.session_id] then
                 .sessions[$e.session_id] |= (
@@ -71,9 +98,12 @@ jq -R -s '
               else . end
             elif $e.event_type == "SessionEnd" then
               if .sessions[$e.session_id] then
-                .sessions[$e.session_id].status = "ended"
-                | .sessions[$e.session_id].ended_at //= $e.wall_clock_iso8601
-                | .sessions[$e.session_id].last_activity = $e.wall_clock_iso8601
+                .sessions[$e.session_id] |= (
+                  .status = "ended"
+                  | .ended_at = $e.wall_clock_iso8601
+                  | .last_activity = $e.wall_clock_iso8601
+                  | .dismissed = (($e.payload.synthetic // false) == true)
+                )
               else . end
             else . end
       )
