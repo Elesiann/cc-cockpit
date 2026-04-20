@@ -40,16 +40,40 @@ trap 'printf "\033[?25h\033[?1049l"' EXIT INT TERM
 printf '\033[?1049h\033[?25l'
 
 while true; do
+  stage_err=""
+
   # 1. snapshot under shared lock
-  ( flock -s 9; cp "$STATE/events.jsonl" "$STATE/events.snapshot.jsonl"; ) 9>"$STATE/events.lock"
+  if ! ( flock -s 9; cp "$STATE/events.jsonl" "$STATE/events.snapshot.jsonl"; ) 9>"$STATE/events.lock" 2>"$STATE/snapshot.err"; then
+    stage_err="snapshot"
+  fi
 
-  # 2. reduce (atomic via tmp + mv)
-  "$CC_COCKPIT_HOME/reduce-state.sh" < "$STATE/events.snapshot.jsonl" \
-    > "$STATE/current.json.tmp" \
-    && mv "$STATE/current.json.tmp" "$STATE/current.json"
+  # 2. reduce (atomic via tmp + mv; don't mv on failure so current.json stays
+  #    at last-known-good and the banner makes the staleness obvious)
+  if [ -z "$stage_err" ]; then
+    if "$CC_COCKPIT_HOME/reduce-state.sh" < "$STATE/events.snapshot.jsonl" \
+         > "$STATE/current.json.tmp" 2>"$STATE/reduce.err"; then
+      mv "$STATE/current.json.tmp" "$STATE/current.json"
+    else
+      stage_err="reduce"
+    fi
+  fi
 
-  # 3. build frame
-  frame="$("$CC_COCKPIT_HOME/render.sh" "$STATE/current.json" 2>/dev/null)"
+  # 3. render (always try; reads whatever current.json exists)
+  body=""
+  render_rc=0
+  body="$("$CC_COCKPIT_HOME/render.sh" "$STATE/current.json" 2>"$STATE/render.err")" || render_rc=$?
+  [ "$render_rc" -ne 0 ] && stage_err="${stage_err:+$stage_err, }render"
+
+  # Compose frame: prepend a banner when any stage failed so a stale screen
+  # can never masquerade as a live one.
+  if [ -n "$stage_err" ]; then
+    frame="⚠ DASHBOARD STAGE FAILED: $stage_err — displayed state may be stale.
+   logs: $STATE/{snapshot,reduce,render}.err
+────────────────────────────────────────────────────────────────
+$body"
+  else
+    frame="$body"
+  fi
 
   # 4. write frame only if it changed
   if [ "$frame" != "$prev_frame" ]; then
