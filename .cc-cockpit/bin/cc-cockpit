@@ -99,6 +99,25 @@ cmd_open() {
 
   command -v zellij >/dev/null || die "zellij not found on PATH"
 
+  # Live-instance lock. Per design, only one cockpit may run against a workspace
+  # at a time — concurrent cockpits would race on current.json.tmp, last_bell_seq,
+  # and events.snapshot.jsonl. We take a non-blocking exclusive flock on fd 201
+  # and hold it through `exec zellij`: bash does not set FD_CLOEXEC on
+  # redirect-opened fds, so the lock persists until the zellij process exits.
+  exec 201>"$state_home/cockpit.live.lock"
+  if ! flock -n -x 201; then
+    local holder=""
+    if [ -s "$state_home/cockpit.live.lock" ]; then
+      holder=" (pid $(cat "$state_home/cockpit.live.lock"))"
+    fi
+    die "a cockpit is already running for workspace '$name'$holder.
+    Lockfile: $state_home/cockpit.live.lock
+    If you believe the holder is gone (stale lock): rm -f '$state_home/cockpit.live.lock'"
+  fi
+  # Record the eventual zellij PID so a later caller can identify the holder.
+  # ($$ doesn't change through exec; the shell's PID becomes zellij's PID.)
+  printf '%s\n' "$$" >&201
+
   export CC_COCKPIT_HOME="$CC_COCKPIT_INSTALL_HOME"
   export COCKPIT_STATE_HOME="$state_home"
   export COCKPIT_WORKSPACE_NAME="$name"
