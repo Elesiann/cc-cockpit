@@ -31,7 +31,14 @@ find_workspace() {
 }
 
 # ---------- shared: append event under flock ----------
-# $1 = event JSON (without seq / wall_clock_iso8601)
+# $1 = event JSON (without seq / wall_clock_iso8601).
+#
+# Seq-gap note: the counter is bumped BEFORE the log append. If the log write
+# fails (ENOSPC, ENOENT during race, etc.) the counter is permanently ahead
+# and a gap in seq values is left. The reducer tolerates gaps (sort_by keeps
+# order regardless), so this is a silent event-loss failure mode rather than
+# a corruption one. A future hardening could use a single transactional write
+# (event carries its own seq; counter updates from the event tail). v0.1: OK.
 append_event() {
   local ev="$1"
   [ -n "${COCKPIT_STATE_HOME:-}" ] || return 0
@@ -74,7 +81,19 @@ cmd_open() {
   fi
 
   local state_home="${XDG_STATE_HOME:-$HOME/.local/state}/cc-cockpit/$name"
-  mkdir -p "$state_home"
+  mkdir -p "$state_home" \
+    || die "cannot create state dir '$state_home' (permission denied or parent not writable)"
+  [ -w "$state_home" ] \
+    || die "state dir '$state_home' is not writable"
+
+  # Sanity-check the install tree — if cc-cockpit was copied (not symlinked)
+  # onto PATH without its siblings, CC_COCKPIT_INSTALL_HOME resolves to a dir
+  # missing reduce-state.sh et al., and the dashboard would fail with an
+  # unhelpful 'no such file' later. Fail loud and early.
+  for f in reduce-state.sh render.sh dashboard.sh layouts/initial.kdl; do
+    [ -e "$CC_COCKPIT_INSTALL_HOME/$f" ] \
+      || die "broken install: missing '$CC_COCKPIT_INSTALL_HOME/$f'. Symlink the binary from a full source tree instead of copying it."
+  done
 
   # Bind name ↔ canonical root under an init lock. The check-and-write of
   # workspace_root, seq.counter, and events.jsonl must be atomic — otherwise two
@@ -104,19 +123,23 @@ cmd_open() {
   # and events.snapshot.jsonl. We take a non-blocking exclusive flock on fd 201
   # and hold it through `exec zellij`: bash does not set FD_CLOEXEC on
   # redirect-opened fds, so the lock persists until the zellij process exits.
-  exec 201>"$state_home/cockpit.live.lock"
+  #
+  # PID hint lives in a SEPARATE file (cockpit.live.pid), written only after the
+  # lock is acquired. A would-be second caller reads that file BEFORE opening the
+  # lockfile so the PID hint survives even though opening the lockfile truncates.
+  local pid_file="$state_home/cockpit.live.pid"
+  local lock_file="$state_home/cockpit.live.lock"
+  local existing_holder=""
+  [ -s "$pid_file" ] && existing_holder=" (pid $(cat "$pid_file" 2>/dev/null || echo ?))"
+
+  exec 201>"$lock_file"
   if ! flock -n -x 201; then
-    local holder=""
-    if [ -s "$state_home/cockpit.live.lock" ]; then
-      holder=" (pid $(cat "$state_home/cockpit.live.lock"))"
-    fi
-    die "a cockpit is already running for workspace '$name'$holder.
-    Lockfile: $state_home/cockpit.live.lock
-    If you believe the holder is gone (stale lock): rm -f '$state_home/cockpit.live.lock'"
+    die "a cockpit is already running for workspace '$name'$existing_holder.
+    Lockfile: $lock_file
+    If you believe the holder is gone (stale lock): rm -f '$lock_file' '$pid_file'"
   fi
-  # Record the eventual zellij PID so a later caller can identify the holder.
-  # ($$ doesn't change through exec; the shell's PID becomes zellij's PID.)
-  printf '%s\n' "$$" >&201
+  # Record the eventual zellij PID. ($$ doesn't change through exec.)
+  echo "$$" > "$pid_file"
 
   export CC_COCKPIT_HOME="$CC_COCKPIT_INSTALL_HOME"
   export COCKPIT_STATE_HOME="$state_home"
@@ -148,6 +171,10 @@ cmd_spawn() {
   [ -n "${CC_COCKPIT_WORKSPACE_ROOT:-}" ] || die "spawn: CC_COCKPIT_WORKSPACE_ROOT not set"
 
   local ws_json="$CC_COCKPIT_WORKSPACE_ROOT/.cc-cockpit/workspace.json"
+  # Validate shape before indexing — a malformed .repos would error out of
+  # jq with a confusing message.
+  jq -e '.repos | type == "object"' "$ws_json" >/dev/null 2>&1 \
+    || die "spawn: workspace.json .repos must be an object { \"<label>\": \"<path>\", ... }"
   local rel
   rel="$(jq -r --arg k "$repo" '.repos[$k] // empty' "$ws_json")"
   if [ -z "$rel" ]; then
@@ -239,7 +266,7 @@ cmd_mark_ended() {
   # noisy confirmation is still cheaper than silent batch-kill.
   if [ "$count" -gt 1 ] && [ "$yes_flag" -ne 1 ]; then
     echo "mark-ended: would dismiss $count session(s):" >&2
-    printf '  - %s\n' $targets >&2
+    while IFS= read -r sid; do [ -n "$sid" ] && printf '  - %s\n' "$sid" >&2; done <<< "$targets"
     die "re-run with --yes to confirm (or give a more specific prefix)"
   fi
 
@@ -266,18 +293,21 @@ cmd_hook() {
   # Guard: silent no-op outside a cockpit-spawned session
   [ "${COCKPIT_SESSION_ACTIVE:-}" = "1" ] || exit 0
   [ -n "${COCKPIT_STATE_HOME:-}" ] || exit 0
-  mkdir -p "$COCKPIT_STATE_HOME"
+  mkdir -p "$COCKPIT_STATE_HOME" 2>/dev/null || exit 0
 
-  local payload
+  # Hooks must be silent on the Claude Code side: any stderr from jq lands in
+  # the claude pane as noise. Every jq call here redirects stderr; any failure
+  # causes an exit 0 (silent no-op), protecting the operator from a malformed
+  # payload turning the pane into an error stream.
+  local payload sid
   payload="$(cat)"
-  local sid
   sid="$(jq -r '.session_id // empty' <<< "$payload" 2>/dev/null)"
   [ -n "$sid" ] || exit 0
 
-  local ev='{}'
+  local ev=''
   case "$event" in
     SessionStart)
-      ev="$(jq -n \
+      ev="$(jq -n 2>/dev/null \
         --arg sid "$sid" \
         --arg et  "SessionStart" \
         --arg repo "${COCKPIT_PRIMARY_REPO:-}" \
@@ -301,44 +331,46 @@ cmd_hook() {
       ;;
     UserPromptSubmit)
       local preview
-      preview="$(jq -r '.prompt // ""' <<< "$payload" | tr '\n' ' ' | cut -c1-80)"
-      ev="$(jq -n \
+      preview="$(jq -r '.prompt // ""' <<< "$payload" 2>/dev/null | tr '\n' ' ' | cut -c1-80)"
+      ev="$(jq -n 2>/dev/null \
         --arg sid "$sid" --arg et "UserPromptSubmit" --arg p "$preview" \
         '{event_type:$et, session_id:$sid, payload:{prompt_preview:$p}}')"
       ;;
     PermissionRequest)
-      ev="$(jq -n --arg sid "$sid" --arg et "PermissionRequest" \
+      ev="$(jq -n 2>/dev/null --arg sid "$sid" --arg et "PermissionRequest" \
         '{event_type:$et, session_id:$sid, payload:{}}')"
       ;;
     Notification)
       local ntype
-      ntype="$(jq -r '.notification_type // ""' <<< "$payload")"
+      ntype="$(jq -r '.notification_type // ""' <<< "$payload" 2>/dev/null)"
       # Only admit idle_prompt / permission_prompt — these genuinely require operator attention
       case "$ntype" in
         idle_prompt|permission_prompt) ;;
         *) exit 0 ;;
       esac
-      ev="$(jq -n --arg sid "$sid" --arg et "Notification" --arg nt "$ntype" \
+      ev="$(jq -n 2>/dev/null --arg sid "$sid" --arg et "Notification" --arg nt "$ntype" \
         '{event_type:$et, session_id:$sid, payload:{notification_type:$nt}}')"
       ;;
     PostToolUse)
       local tool
-      tool="$(jq -r '.tool_name // ""' <<< "$payload")"
-      ev="$(jq -n --arg sid "$sid" --arg et "PostToolUse" --arg t "$tool" \
+      tool="$(jq -r '.tool_name // ""' <<< "$payload" 2>/dev/null)"
+      ev="$(jq -n 2>/dev/null --arg sid "$sid" --arg et "PostToolUse" --arg t "$tool" \
         '{event_type:$et, session_id:$sid, payload:{tool_name:$t, success:true}}')"
       ;;
     Stop)
-      ev="$(jq -n --arg sid "$sid" --arg et "Stop" \
+      ev="$(jq -n 2>/dev/null --arg sid "$sid" --arg et "Stop" \
         '{event_type:$et, session_id:$sid, payload:{}}')"
       ;;
     SessionEnd)
-      ev="$(jq -n --arg sid "$sid" --arg et "SessionEnd" \
+      ev="$(jq -n 2>/dev/null --arg sid "$sid" --arg et "SessionEnd" \
         '{event_type:$et, session_id:$sid, payload:{}}')"
       ;;
     *) exit 0 ;;
   esac
 
-  append_event "$ev"
+  # If jq failed to produce an event (empty), silently drop this hook
+  [ -n "$ev" ] || exit 0
+  append_event "$ev" 2>/dev/null || exit 0
 }
 
 # ============================================================
