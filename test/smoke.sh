@@ -170,7 +170,23 @@ else
 fi
 
 # =============================================================
-echo '[8] bell event-delta: Notification counts even when reducer collapses'
+echo '[8] mark-ended tolerates empty current sessions'
+# =============================================================
+mkdir -p "$SANDBOX/mark-empty"
+touch "$SANDBOX/mark-empty/events.jsonl"
+echo '{"sessions":null}' > "$SANDBOX/mark-empty/current.json"
+out="$(COCKPIT_STATE_HOME="$SANDBOX/mark-empty" "$BIN" mark-ended all-non-ended --yes 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] \
+   && echo "$out" | grep -q "no matching non-ended sessions" \
+   && ! echo "$out" | grep -q '^jq:'; then
+  pass 'mark-ended handles empty sessions without jq noise'
+else
+  fail "mark-ended empty sessions noisy/failing: rc=$rc out='$out'"
+fi
+
+# =============================================================
+echo '[9] bell event-delta: Notification counts even when reducer collapses'
 # =============================================================
 cat > "$SANDBOX/events-transient.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
@@ -189,7 +205,7 @@ collapsed="$("$REDUCER" < "$SANDBOX/events-transient.jsonl" | jq -r '.sessions.s
   || fail "bell or collapse broken: attn=$attn status=$collapsed"
 
 # =============================================================
-echo '[9] synthetic SessionEnd revivable; natural stays terminal'
+echo '[10] synthetic SessionEnd revivable; natural stays terminal'
 # =============================================================
 cat > "$SANDBOX/events-dismiss.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"a","payload":{"primary_repo":"r","task_name":"ta","declared_related_repos":[]}}
@@ -206,7 +222,7 @@ b_status="$("$REDUCER" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.st
   || fail "dismissal logic broken: a=$a_status (want running), b=$b_status (want ended)"
 
 # =============================================================
-echo '[10] reducer determinism'
+echo '[11] reducer determinism'
 # =============================================================
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r1"
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r2"

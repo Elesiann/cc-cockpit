@@ -254,10 +254,10 @@ cmd_mark_ended() {
 
   local targets
   if [ "$prefix" = "all-non-ended" ]; then
-    targets="$(jq -r '.sessions | to_entries[] | select(.value.status != "ended") | .key' "$current")"
+    targets="$(jq -r '(.sessions // {}) | to_entries[] | select(.value.status != "ended") | .key' "$current")"
   else
     targets="$(jq -r --arg p "$prefix" \
-      '.sessions | to_entries[] | select(.value.status != "ended" and (.key | startswith($p))) | .key' \
+      '(.sessions // {}) | to_entries[] | select(.value.status != "ended" and (.key | startswith($p))) | .key' \
       "$current")"
   fi
 
