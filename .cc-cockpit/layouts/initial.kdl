@@ -10,4 +10,39 @@ layout {
             command "bash"
         }
     }
+
+    swap_tiled_layout name="cc-cockpit" {
+        tab exact_panes=2 {
+            pane split_direction="vertical" {
+                pane size=60 borderless=false {
+                    name "cc-cockpit dashboard"
+                    command "bash"
+                    args "-c" "exec \"$CC_COCKPIT_HOME/dashboard.sh\""
+                }
+                pane {
+                    name "control"
+                    command "bash"
+                }
+            }
+        }
+
+        tab min_panes=3 {
+            pane split_direction="horizontal" {
+                pane split_direction="vertical" size="50%" {
+                    pane size=60 borderless=false {
+                        name "cc-cockpit dashboard"
+                        command "bash"
+                        args "-c" "exec \"$CC_COCKPIT_HOME/dashboard.sh\""
+                    }
+                    pane {
+                        name "control"
+                        command "bash"
+                    }
+                }
+                pane split_direction="vertical" {
+                    children
+                }
+            }
+        }
+    }
 }

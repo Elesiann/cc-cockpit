@@ -176,7 +176,7 @@ This walks up until it finds `.cc-cockpit/workspace.json`, initializes state, an
 cc-cockpit spawn --repo api --task "fix auth bug"
 ```
 
-A 3rd pane opens to the right with Claude running in the chosen repo. Dashboard updates in ≤1s.
+A Claude pane opens in a bottom row below the dashboard/control pair. Additional spawned sessions share that bottom row. Dashboard updates in ≤1s.
 
 **Observe:** keep an eye on `STATUS`.
 
@@ -297,7 +297,7 @@ Most are on the v1.1/v1.5 roadmap.
     ├── reduce-state.sh                ← pure-jq reducer, events.jsonl → current.json
     ├── render.sh                      ← current.json → terminal frame
     ├── dashboard.sh                   ← render loop + bell + alt-screen flicker-free
-    ├── layouts/initial.kdl            ← Zellij layout (dashboard | control)
+    ├── layouts/initial.kdl            ← Zellij layout (dashboard | control over spawned panes)
     └── examples/
         ├── workspace.example.json     ← minimal workspace config
         └── settings.snippet.json      ← hook registration for ~/.claude/settings.json

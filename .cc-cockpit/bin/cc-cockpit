@@ -220,7 +220,7 @@ cmd_spawn() {
   # Truncate pane name to something reasonable
   pane_name="${pane_name:0:60}"
 
-  zellij action new-pane --direction right --cwd "$abs" --name "$pane_name" -- \
+  zellij action new-pane --cwd "$abs" --name "$pane_name" -- \
     env \
       COCKPIT_SESSION_ACTIVE=1 \
       COCKPIT_STATE_HOME="$COCKPIT_STATE_HOME" \
