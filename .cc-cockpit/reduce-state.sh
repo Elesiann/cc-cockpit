@@ -29,7 +29,9 @@ jq -R -s '
       | map(select(
           (type == "object")
           and ((.seq | type) == "number")
-          and ((.wall_clock_iso8601 | type) == "string" and (.wall_clock_iso8601 | length) > 0)
+          and ((.wall_clock_iso8601 | type) == "string"
+               and (.wall_clock_iso8601 | length) > 0
+               and ((try (.wall_clock_iso8601 | fromdateiso8601) catch null) != null))
           and ((.event_type | type) == "string" and (.event_type | length) > 0)
           and ((.session_id | type) == "string" and (.session_id | length) > 0)
           and ((has("payload") | not) or (.payload == null) or ((.payload | type) == "object"))

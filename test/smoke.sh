@@ -145,13 +145,14 @@ cat > "$SANDBOX/events-bad.jsonl" <<EOF
 THIS LINE IS NOT JSON
 {"seq":99,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","payload":{}}
 {"seq":100,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"bad","payload":[]}
+{"seq":101,"wall_clock_iso8601":"not-a-date","event_type":"SessionStart","session_id":"badtime","payload":{}}
 {"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"Stop","session_id":"s1","payload":{}}
 EOF
 dropped="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.dropped_events')"
 status="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status')"
-[ "$dropped" = "3" ] && [ "$status" = "idle" ] \
+[ "$dropped" = "4" ] && [ "$status" = "idle" ] \
   && pass "reducer: dropped=$dropped, status=$status" \
-  || fail "reducer: dropped=$dropped, status=$status (expected 3, idle)"
+  || fail "reducer: dropped=$dropped, status=$status (expected 4, idle)"
 
 # =============================================================
 echo '[7] bell event-delta: Notification counts even when reducer collapses'
