@@ -22,6 +22,7 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$HERE/.cc-cockpit/bin/cc-cockpit"
 REDUCER="$HERE/.cc-cockpit/reduce-state.sh"
+RENDER="$HERE/.cc-cockpit/render.sh"
 
 PASS=0
 FAIL=0
@@ -155,7 +156,21 @@ status="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status'
   || fail "reducer: dropped=$dropped, status=$status (expected 4, idle)"
 
 # =============================================================
-echo '[7] bell event-delta: Notification counts even when reducer collapses'
+echo '[7] render fails loudly on corrupt current.json'
+# =============================================================
+cat > "$SANDBOX/current-badtime.json" <<EOF
+{"sessions":{"s1":{"status":"running","started_at":"not-a-date","last_activity":"not-a-date","primary_repo":"r","task_name":"t"}},"dropped_events":0}
+EOF
+if "$RENDER" "$SANDBOX/current-badtime.json" > "$SANDBOX/render.out" 2> "$SANDBOX/render.err"; then
+  fail 'render accepted invalid timestamps with exit 0'
+elif grep -q 'date "not-a-date"' "$SANDBOX/render.err"; then
+  pass 'render exits non-zero when date parsing fails'
+else
+  fail "render failed without useful date error: $(cat "$SANDBOX/render.err")"
+fi
+
+# =============================================================
+echo '[8] bell event-delta: Notification counts even when reducer collapses'
 # =============================================================
 cat > "$SANDBOX/events-transient.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
@@ -174,7 +189,7 @@ collapsed="$("$REDUCER" < "$SANDBOX/events-transient.jsonl" | jq -r '.sessions.s
   || fail "bell or collapse broken: attn=$attn status=$collapsed"
 
 # =============================================================
-echo '[8] synthetic SessionEnd revivable; natural stays terminal'
+echo '[9] synthetic SessionEnd revivable; natural stays terminal'
 # =============================================================
 cat > "$SANDBOX/events-dismiss.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"a","payload":{"primary_repo":"r","task_name":"ta","declared_related_repos":[]}}
@@ -191,7 +206,7 @@ b_status="$("$REDUCER" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.st
   || fail "dismissal logic broken: a=$a_status (want running), b=$b_status (want ended)"
 
 # =============================================================
-echo '[9] reducer determinism'
+echo '[10] reducer determinism'
 # =============================================================
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r1"
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r2"

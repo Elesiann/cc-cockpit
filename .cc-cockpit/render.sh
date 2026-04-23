@@ -1,7 +1,7 @@
 #!/bin/bash
 # render.sh <current.json>
 # Simple table render — active sessions on top, ended below.
-set -u
+set -euo pipefail
 CUR="${1:-}"
 [ -f "$CUR" ] || { echo "(no current.json yet)"; exit 0; }
 
