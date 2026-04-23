@@ -157,9 +157,18 @@ cmd_spawn() {
   local repo="" task="" related=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --repo)    repo="$2"; shift 2 ;;
-      --task)    task="$2"; shift 2 ;;
-      --related) related="$2"; shift 2 ;;
+      --repo|--task|--related)
+        local flag="$1"
+        if [ $# -lt 2 ] || [[ "$2" == --* ]]; then
+          die "spawn: $flag requires a value"
+        fi
+        case "$flag" in
+          --repo)    repo="$2" ;;
+          --task)    task="$2" ;;
+          --related) related="$2" ;;
+        esac
+        shift 2
+        ;;
       *) die "spawn: unknown flag '$1'" ;;
     esac
   done

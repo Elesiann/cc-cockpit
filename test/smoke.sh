@@ -113,7 +113,32 @@ echo "$out" | grep -q 'not a git repo' && pass 'non-git dir rejected' || fail "n
 unset ZELLIJ CC_COCKPIT_HOME COCKPIT_STATE_HOME CC_COCKPIT_WORKSPACE_ROOT COCKPIT_WORKSPACE_NAME
 
 # =============================================================
-echo '[5] reducer tolerates malformed events'
+echo '[5] spawn rejects flags without values cleanly'
+# =============================================================
+for flag in --repo --task --related; do
+  out="$("$BIN" spawn "$flag" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 2 ] \
+     && echo "$out" | grep -q "spawn: $flag requires a value" \
+     && ! echo "$out" | grep -q 'unbound variable'; then
+    pass "spawn $flag without value rejected cleanly"
+  else
+    fail "spawn $flag bad error: rc=$rc out='$out'"
+  fi
+done
+
+out="$("$BIN" spawn --repo --task t 2>&1)"
+rc=$?
+if [ "$rc" -eq 2 ] \
+   && echo "$out" | grep -q 'spawn: --repo requires a value' \
+   && ! echo "$out" | grep -q 'unbound variable'; then
+  pass 'spawn --repo followed by another flag rejected as missing value'
+else
+  fail "spawn --repo accepted another flag as value: rc=$rc out='$out'"
+fi
+
+# =============================================================
+echo '[6] reducer tolerates malformed events'
 # =============================================================
 cat > "$SANDBOX/events-bad.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"r","declared_related_repos":[],"task_name":"t","cwd":"/x"}}
@@ -127,7 +152,7 @@ status="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status'
   || fail "reducer: dropped=$dropped, status=$status (expected 1, idle)"
 
 # =============================================================
-echo '[6] bell event-delta: Notification counts even when reducer collapses'
+echo '[7] bell event-delta: Notification counts even when reducer collapses'
 # =============================================================
 cat > "$SANDBOX/events-transient.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
@@ -146,7 +171,7 @@ collapsed="$("$REDUCER" < "$SANDBOX/events-transient.jsonl" | jq -r '.sessions.s
   || fail "bell or collapse broken: attn=$attn status=$collapsed"
 
 # =============================================================
-echo '[7] synthetic SessionEnd revivable; natural stays terminal'
+echo '[8] synthetic SessionEnd revivable; natural stays terminal'
 # =============================================================
 cat > "$SANDBOX/events-dismiss.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"a","payload":{"primary_repo":"r","task_name":"ta","declared_related_repos":[]}}
@@ -163,7 +188,7 @@ b_status="$("$REDUCER" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.st
   || fail "dismissal logic broken: a=$a_status (want running), b=$b_status (want ended)"
 
 # =============================================================
-echo '[8] reducer determinism'
+echo '[9] reducer determinism'
 # =============================================================
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r1"
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r2"
