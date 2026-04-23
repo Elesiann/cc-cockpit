@@ -143,13 +143,15 @@ echo '[6] reducer tolerates malformed events'
 cat > "$SANDBOX/events-bad.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"r","declared_related_repos":[],"task_name":"t","cwd":"/x"}}
 THIS LINE IS NOT JSON
+{"seq":99,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","payload":{}}
+{"seq":100,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"bad","payload":[]}
 {"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"Stop","session_id":"s1","payload":{}}
 EOF
 dropped="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.dropped_events')"
 status="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status')"
-[ "$dropped" = "1" ] && [ "$status" = "idle" ] \
+[ "$dropped" = "3" ] && [ "$status" = "idle" ] \
   && pass "reducer: dropped=$dropped, status=$status" \
-  || fail "reducer: dropped=$dropped, status=$status (expected 1, idle)"
+  || fail "reducer: dropped=$dropped, status=$status (expected 3, idle)"
 
 # =============================================================
 echo '[7] bell event-delta: Notification counts even when reducer collapses'

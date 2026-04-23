@@ -1,9 +1,10 @@
 #!/bin/bash
 # reduce-state.sh — consume events.jsonl from stdin, emit current.json on stdout.
 #
-# Robust to malformed lines: uses line-oriented parsing with `fromjson?` so a
+# Robust to malformed events: uses line-oriented parsing with `fromjson?` so a
 # single truncated / corrupted record doesn't poison the whole reducer. Invalid
-# lines are counted in `dropped_events` (top-level sibling of `sessions`).
+# JSON lines and structurally invalid event objects are counted in
+# `dropped_events` (top-level sibling of `sessions`).
 #
 # Ordering assumption: within a single Claude Code session, hooks fire serially
 # (the claude process waits for each hook's exit before proceeding), so for any
@@ -23,7 +24,18 @@ set -u
 jq -R -s '
   split("\n")
   | map(select(length > 0)) as $lines
-  | ($lines | map(fromjson?) | map(select(. != null))) as $good
+  | ($lines | map(fromjson?) | map(select(. != null))) as $parsed
+  | ($parsed
+      | map(select(
+          (type == "object")
+          and ((.seq | type) == "number")
+          and ((.wall_clock_iso8601 | type) == "string" and (.wall_clock_iso8601 | length) > 0)
+          and ((.event_type | type) == "string" and (.event_type | length) > 0)
+          and ((.session_id | type) == "string" and (.session_id | length) > 0)
+          and ((has("payload") | not) or (.payload == null) or ((.payload | type) == "object"))
+        ))
+      | map(.payload = (if has("payload") and .payload != null then .payload else {} end))
+    ) as $good
   | ($lines | length) as $total
   | ($good
       | sort_by(.seq)
