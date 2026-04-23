@@ -60,6 +60,16 @@ fi
 # =============================================================
 echo '[2] workspace name slug validation'
 # =============================================================
+mkdir -p "$SANDBOX/ws-badjson/.cc-cockpit"
+printf '{not json\n' > "$SANDBOX/ws-badjson/.cc-cockpit/workspace.json"
+out="$(cd "$SANDBOX/ws-badjson" && "$BIN" open 2>&1 < /dev/null)"
+if echo "$out" | grep -q 'workspace.json must be a valid JSON object' \
+   && ! echo "$out" | grep -q '^jq:'; then
+  pass 'invalid workspace.json rejected without raw jq noise'
+else
+  fail "invalid workspace.json error noisy/unclear: '$out'"
+fi
+
 cd "$SANDBOX" && mkdir -p ws-badslug/.cc-cockpit
 for bad in '../evil' 'foo/bar' '.hidden' '' 'a b'; do
   echo "{\"name\":\"$bad\",\"repos\":{}}" > "$SANDBOX/ws-badslug/.cc-cockpit/workspace.json"

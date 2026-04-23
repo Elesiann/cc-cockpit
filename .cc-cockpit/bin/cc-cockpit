@@ -71,8 +71,12 @@ cmd_open() {
   local ws_canonical
   ws_canonical="$(realpath -- "$ws")" || die "cannot canonicalize workspace path: $ws"
 
+  local ws_json="$ws/.cc-cockpit/workspace.json"
+  jq -e 'type == "object"' "$ws_json" >/dev/null 2>&1 \
+    || die "workspace.json must be a valid JSON object"
+
   local name
-  name="$(jq -r '.name' "$ws/.cc-cockpit/workspace.json")"
+  name="$(jq -r '.name // empty' "$ws_json")"
   [ -n "$name" ] && [ "$name" != "null" ] || die "workspace.json missing 'name'"
 
   # Validate name as a safe slug — no path components, no traversal, must start alnum.
