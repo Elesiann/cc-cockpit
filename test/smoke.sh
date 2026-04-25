@@ -168,7 +168,31 @@ else
 fi
 
 # =============================================================
-echo '[4] canonical-root binding blocks name collision'
+echo '[4] doctor validates install and workspace health'
+# =============================================================
+cat > "$SANDBOX/bin/zellij" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+cat > "$SANDBOX/bin/claude" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$SANDBOX/bin/zellij" "$SANDBOX/bin/claude"
+out="$(cd "$SANDBOX/ws-init" \
+  && CLAUDE_SETTINGS_PATH="$SETTINGS" PATH="$SANDBOX/bin:$PATH" "$BIN" doctor 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] \
+   && echo "$out" | grep -q "ok: workspace: initws" \
+   && echo "$out" | grep -q "ok: repo 'api': packages/api" \
+   && echo "$out" | grep -q "doctor: all checks passed"; then
+  pass 'doctor passes for valid install and workspace'
+else
+  fail "doctor failed unexpectedly: rc=$rc out='$out'"
+fi
+
+# =============================================================
+echo '[5] canonical-root binding blocks name collision'
 # =============================================================
 mkdir -p "$SANDBOX/ws-a/child" "$SANDBOX/ws-b/child"
 (cd "$SANDBOX/ws-a/child" && git init -q)
@@ -189,7 +213,7 @@ else
 fi
 
 # =============================================================
-echo '[5] spawn containment + git-repo check'
+echo '[6] spawn containment + git-repo check'
 # =============================================================
 mkdir -p "$SANDBOX/ws-spawn/good" "$SANDBOX/ws-spawn/notgit" "$SANDBOX/outside-ws"
 (cd "$SANDBOX/ws-spawn/good" && git init -q)
@@ -261,7 +285,7 @@ fi
 unset ZELLIJ CC_COCKPIT_HOME COCKPIT_STATE_HOME CC_COCKPIT_WORKSPACE_ROOT COCKPIT_WORKSPACE_NAME
 
 # =============================================================
-echo '[6] spawn rejects flags without values cleanly'
+echo '[7] spawn rejects flags without values cleanly'
 # =============================================================
 for flag in --repo --task --related; do
   out="$("$BIN" spawn "$flag" 2>&1)"
@@ -286,7 +310,7 @@ else
 fi
 
 # =============================================================
-echo '[7] initial layout has bottom spawn row swap layout'
+echo '[8] initial layout has bottom spawn row swap layout'
 # =============================================================
 if grep -q 'swap_tiled_layout name="cc-cockpit"' "$LAYOUT" \
    && grep -q 'tab min_panes=3' "$LAYOUT" \
@@ -297,7 +321,7 @@ else
 fi
 
 # =============================================================
-echo '[8] reducer tolerates malformed events'
+echo '[9] reducer tolerates malformed events'
 # =============================================================
 cat > "$SANDBOX/events-bad.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"r","declared_related_repos":[],"task_name":"t","cwd":"/x"}}
@@ -314,7 +338,7 @@ status="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status'
   || fail "reducer: dropped=$dropped, status=$status (expected 4, idle)"
 
 # =============================================================
-echo '[9] render fails loudly on corrupt current.json'
+echo '[10] render fails loudly on corrupt current.json'
 # =============================================================
 cat > "$SANDBOX/current-badtime.json" <<EOF
 {"sessions":{"s1":{"status":"running","started_at":"not-a-date","last_activity":"not-a-date","primary_repo":"r","task_name":"t"}},"dropped_events":0}
@@ -328,7 +352,7 @@ else
 fi
 
 # =============================================================
-echo '[10] mark-ended tolerates empty current sessions'
+echo '[11] mark-ended tolerates empty current sessions'
 # =============================================================
 mkdir -p "$SANDBOX/mark-empty"
 touch "$SANDBOX/mark-empty/events.jsonl"
@@ -344,7 +368,7 @@ else
 fi
 
 # =============================================================
-echo '[11] bell event-delta: Notification counts even when reducer collapses'
+echo '[12] bell event-delta: Notification counts even when reducer collapses'
 # =============================================================
 cat > "$SANDBOX/events-transient.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
@@ -363,7 +387,7 @@ collapsed="$("$REDUCER" < "$SANDBOX/events-transient.jsonl" | jq -r '.sessions.s
   || fail "bell or collapse broken: attn=$attn status=$collapsed"
 
 # =============================================================
-echo '[12] synthetic SessionEnd revivable; natural stays terminal'
+echo '[13] synthetic SessionEnd revivable; natural stays terminal'
 # =============================================================
 cat > "$SANDBOX/events-dismiss.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"a","payload":{"primary_repo":"r","task_name":"ta","declared_related_repos":[]}}
@@ -380,7 +404,7 @@ b_status="$("$REDUCER" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.st
   || fail "dismissal logic broken: a=$a_status (want running), b=$b_status (want ended)"
 
 # =============================================================
-echo '[13] reducer determinism'
+echo '[14] reducer determinism'
 # =============================================================
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r1"
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r2"
