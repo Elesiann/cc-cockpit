@@ -7,6 +7,32 @@
 
 ---
 
+## Quickstart
+
+```bash
+# one time, in the cc-cockpit source checkout
+cd ~/cc-cockpit
+./install
+
+# one time, in the directory that contains your repos
+cd ~/my-workspace
+cc-cockpit init
+cc-cockpit doctor
+
+# daily
+cc-cockpit open
+```
+
+Inside the cockpit control pane:
+
+```bash
+cc-cockpit start api fix auth bug
+```
+
+Command words are literal: `install` sets up your machine, `init` creates workspace config, `open` opens the cockpit, and `start` starts a session.
+
+---
+
 ## Why this exists
 
 Claude Code made it cheap to spin up many agents in parallel. The bottleneck moved from **compute** to **attention** — N sessions running simultaneously demand N contexts in an operator's head. Existing agent orchestrators answer this, but they all make the same assumption:
@@ -70,7 +96,7 @@ Three planes you always have in your head:
 ┌─── Control plane ───┐    ┌─── Observation plane ───┐
 │ cc-cockpit CLI      │    │ dashboard pane          │
 │   open / start /    │    │ (read-only view of      │
-│   mark-ended / hook │    │  sessions + bell on     │
+│   doctor / mark-end │    │  sessions + bell on     │
 │                     │    │  waiting_input)         │
 └─────────────────────┘    └─────────────────────────┘
 ```
@@ -146,8 +172,8 @@ cc-cockpit open
 - `name` is the runtime state dir key. It must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (no slashes, no `..`). Pick something stable — renaming it orphans the previous state.
 - If two different workspace directories declare the same `name`, the second `cc-cockpit open` fails with a clear error. State binds to the **canonical path** of the workspace root on first open and rejects mismatches on subsequent opens. No silent cross-workspace contamination.
 - Keys in `repos` are **short labels** you type in `--repo` (`api`, `web`, ...), not filesystem paths.
-- Values are **relative paths** from the workspace parent to each child repo. Paths that resolve outside the workspace root (e.g. `../sibling`) are rejected at `spawn` time.
-- Children must be **real git repos** — `spawn` verifies `git -C <child> rev-parse --git-dir` and refuses to start Claude anywhere else.
+- Values are **relative paths** from the workspace parent to each child repo. Paths that resolve outside the workspace root (e.g. `../sibling`) are rejected at `start` time.
+- Children must be **real git repos** — `start` verifies `git -C <child> rev-parse --git-dir` and refuses to start Claude anywhere else.
 - You can have multiple workspaces with different `name`s; they don't conflict.
 
 ---
@@ -174,7 +200,7 @@ This walks up until it finds `.cc-cockpit/workspace.json`, initializes state, an
 cc-cockpit start api fix auth bug
 ```
 
-A Claude pane opens in a bottom row below the dashboard/control pair. Additional spawned sessions share that bottom row. Dashboard updates in ≤1s.
+A Claude pane opens in a bottom row below the dashboard/control pair. Additional started sessions share that bottom row. Dashboard updates in ≤1s.
 
 **Observe:** keep an eye on `STATUS`.
 
@@ -201,12 +227,11 @@ Dismissal is non-terminal: if the matched session turns out to still be live, th
 |---|---|
 | `cc-cockpit install` | Install the command on `PATH` and install Claude Code hooks. Usually run via `./install` from the cloned source tree. |
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create `.cc-cockpit/workspace.json`; with no repo specs, auto-discovers child git repos. |
+| `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
 | `cc-cockpit start <repo> <task...>` | Open a new Zellij pane running Claude in `repos[<repo>]`. Run from inside the Zellij (control pane). |
-| `cc-cockpit spawn <repo> <task...>` | Compatibility alias for `start`; the old `spawn --repo <key> --task "<text>"` form still works. |
 | `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **non-terminal**: if the session was actually still live, any later event from it (prompt, tool use, notification) un-dismisses it. Prefixes that match more than one session require `--yes`. |
 | `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session (e.g. after a full Zellij restart). `--yes` required because this always matches multiple sessions. |
-| `cc-cockpit hook <Event>` | **Internal.** Called from `~/.claude/settings.json`. Do not invoke by hand. |
 | `cc-cockpit --version` | Print version. |
 | `cc-cockpit --help` | Short usage. |
 
@@ -249,7 +274,7 @@ Everything else is consequences of those five points.
 
 **Bell didn't fire even though I saw Claude asking for permission** — in `permission_mode: "auto"`, Claude auto-approves and the `Notification` fires transiently. The **visible status** may never enter `waiting_input` because the reducer collapses `Notification → PostToolUse` inside one 0.5s tick. The **bell still fires**, because it's driven by new event sequence numbers (any new `Notification`/`PermissionRequest` event), not by the reduced state. To sustain `waiting_input` in the dashboard, press `Shift+Tab` in the Claude pane to cycle out of auto mode.
 
-**Terminal header of Claude pane looks weird** — the spawn command is `env COCKPIT_... claude`, and the terminal title shows the argv. Pane name (in the Zellij border) IS set correctly via `--name "<repo>: <task>"`; the header text inside Claude's own UI is a claude-side concern.
+**Terminal header of Claude pane looks weird** — the start command runs `env COCKPIT_... claude`, and the terminal title shows the argv. Pane name (in the Zellij border) IS set correctly via `--name "<repo>: <task>"`; the header text inside Claude's own UI is a claude-side concern.
 
 **Dashboard isn't updating or seems frozen** — the dashboard only repaints when the frame actually changes. If nothing is happening, it's fine. Sanity check: `ls -la ~/.local/state/cc-cockpit/<workspace>/current.json` (mtime should advance every ~0.5s).
 
@@ -301,7 +326,7 @@ Most are on the v1.1/v1.5 roadmap.
     ├── reduce-state.sh                ← pure-jq reducer, events.jsonl → current.json
     ├── render.sh                      ← current.json → terminal frame
     ├── dashboard.sh                   ← render loop + bell + alt-screen flicker-free
-    ├── layouts/initial.kdl            ← Zellij layout (dashboard | control over spawned panes)
+    ├── layouts/initial.kdl            ← Zellij layout (dashboard | control over session panes)
     └── examples/
         ├── workspace.example.json     ← minimal workspace config
         └── settings.snippet.json      ← hook registration for ~/.claude/settings.json

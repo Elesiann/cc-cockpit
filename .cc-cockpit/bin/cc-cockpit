@@ -812,19 +812,9 @@ Usage:
       (run from a Zellij pane inside 'open') Create a new pane running Claude
       in the repo referenced by <repo> in workspace.json.
 
-  cc-cockpit spawn <repo> <task...> [--related A,B]
-      Alias-compatible spelling for start.
-
-  cc-cockpit spawn --repo <key> --task "<text>" [--related A,B]
-      Backward-compatible flag form.
-
   cc-cockpit mark-ended <sid-prefix | all-non-ended>
       Append a synthetic SessionEnd for stale sessions (no SessionEnd emitted,
       e.g. after a terminal crash). Takes a session_id prefix or 'all-non-ended'.
-
-  cc-cockpit hook <EventName>
-      Internal — invoked from ~/.claude/settings.json hooks. Reads payload
-      from stdin and appends an event to events.jsonl.
 
   cc-cockpit --version
 EOF
