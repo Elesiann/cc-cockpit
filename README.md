@@ -10,11 +10,11 @@
 ## Quickstart
 
 ```bash
-# one time, in the cc-cockpit source checkout
+# one time, from the cc-cockpit source checkout
 cd ~/cc-cockpit
 ./install
 
-# one time, in the directory that contains your repos
+# one time, from the directory that contains your child git repos
 cd ~/my-workspace
 cc-cockpit init
 cc-cockpit doctor
@@ -30,6 +30,8 @@ cc-cockpit start api fix auth bug
 ```
 
 Command words are literal: `install` sets up your machine, `init` creates workspace config, `open` opens the cockpit, and `start` starts a session.
+
+`./install` is only available in the cloned `cc-cockpit` source checkout. After that, use the installed `cc-cockpit` command from your workspaces.
 
 ---
 
@@ -136,7 +138,9 @@ cd ~/cc-cockpit
 ./install
 ```
 
-No manual hook merge is needed. `./install` creates `~/.local/bin/cc-cockpit`, backs up `~/.claude/settings.json` if it must change, and installs the hook entries idempotently.
+Run `./install` from the `cc-cockpit` source checkout only. It creates `~/.local/bin/cc-cockpit`, backs up `~/.claude/settings.json` if it must change, and installs the hook entries idempotently. No manual hook merge is needed.
+
+If `cc-cockpit` is still not found after install, make sure `~/.local/bin` is on your shell `PATH`.
 
 The `Notification` hook uses `matcher: "idle_prompt|permission_prompt"` — this is the real signal that Claude is waiting on you (validated empirically against real Claude Code payloads before the hook was wired).
 
@@ -150,6 +154,11 @@ The `Notification` hook uses `matcher: "idle_prompt|permission_prompt"` — this
 mkdir -p ~/my-workspace
 cd ~/my-workspace
 
+# Example shape before init:
+#   ~/my-workspace/api/.git
+#   ~/my-workspace/web/.git
+#   ~/my-workspace/infra/.git
+#
 # Initialize the workspace config.
 cc-cockpit init
 ```
@@ -171,7 +180,7 @@ cc-cockpit open
 
 - `name` is the runtime state dir key. It must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (no slashes, no `..`). Pick something stable — renaming it orphans the previous state.
 - If two different workspace directories declare the same `name`, the second `cc-cockpit open` fails with a clear error. State binds to the **canonical path** of the workspace root on first open and rejects mismatches on subsequent opens. No silent cross-workspace contamination.
-- Keys in `repos` are **short labels** you type in `--repo` (`api`, `web`, ...), not filesystem paths.
+- Keys in `repos` are **short labels** you type in `cc-cockpit start <repo> ...` (`api`, `web`, ...), not filesystem paths.
 - Values are **relative paths** from the workspace parent to each child repo. Paths that resolve outside the workspace root (e.g. `../sibling`) are rejected at `start` time.
 - Children must be **real git repos** — `start` verifies `git -C <child> rev-parse --git-dir` and refuses to start Claude anywhere else.
 - You can have multiple workspaces with different `name`s; they don't conflict.
@@ -225,7 +234,8 @@ Dismissal is non-terminal: if the matched session turns out to still be live, th
 
 | Command | Use |
 |---|---|
-| `cc-cockpit install` | Install the command on `PATH` and install Claude Code hooks. Usually run via `./install` from the cloned source tree. |
+| `./install` | From the `cc-cockpit` source checkout only: install the command on `PATH` and install Claude Code hooks. |
+| `cc-cockpit install` | Re-run the installer after the command is already available, or use advanced flags like `--settings`. |
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create `.cc-cockpit/workspace.json`; with no repo specs, auto-discovers child git repos. |
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
