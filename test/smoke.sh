@@ -126,7 +126,10 @@ api_path="$(jq -r '.repos.api // empty' "$SANDBOX/ws-init/.cc-cockpit/workspace.
 web_path="$(jq -r '.repos.web // empty' "$SANDBOX/ws-init/.cc-cockpit/workspace.json")"
 if [ "$rc" -eq 0 ] \
    && [ "$api_path" = "packages/api" ] \
-   && [ "$web_path" = "web" ]; then
+   && [ "$web_path" = "web" ] \
+   && echo "$out" | grep -q '^workspace: initws$' \
+   && echo "$out" | grep -q '^repos:$' \
+   && echo "$out" | grep -q 'cc-cockpit start api <task>'; then
   pass 'init auto-discovers child git repos'
 else
   fail "init discovery failed: rc=$rc out='$out' api=$api_path web=$web_path"

@@ -251,12 +251,17 @@ cmd_init() {
     || die "init: cannot write workspace JSON"
   mv "$tmp" "$ws_json" || die "init: cannot replace '$ws_json'"
 
-  echo "init: wrote $ws_json"
-  echo "init: workspace '$name' with ${#INIT_REPO_KEYS[@]} repo(s)"
+  echo "workspace: $name"
+  echo "config: $ws_json"
+  echo
+  echo "repos:"
   for i in "${!INIT_REPO_KEYS[@]}"; do
-    printf '  %s=%s\n' "${INIT_REPO_KEYS[$i]}" "${INIT_REPO_PATHS[$i]}"
+    printf '  %-16s %s\n' "${INIT_REPO_KEYS[$i]}" "${INIT_REPO_PATHS[$i]}"
   done
-  echo "init: next: cc-cockpit open"
+  echo
+  echo "next:"
+  echo "  cc-cockpit open"
+  echo "  cc-cockpit start ${INIT_REPO_KEYS[0]} <task>"
 }
 
 # ---------- shared: append event under flock ----------
