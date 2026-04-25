@@ -2,8 +2,11 @@
 # cc-cockpit — v1 MVP (single-binary dispatch)
 #
 # Subcommands:
+#   install                — install PATH symlink and Claude Code hooks
+#   init                   — create .cc-cockpit/workspace.json
 #   open                   — detect workspace.json, init state, launch Zellij
-#   spawn --repo X --task  — create new pane running Claude in repo X
+#   start REPO TASK...     — create new pane running Claude in repo X
+#   spawn --repo X --task  — compatibility spelling for start
 #   hook <EventName>       — internal: read stdin payload, append event
 #   --version              — print version
 
@@ -17,6 +20,22 @@ CC_COCKPIT_INSTALL_HOME="$(dirname "$(dirname "$__bin_real")")"
 
 die() { echo "cc-cockpit: $*" >&2; exit 2; }
 
+valid_slug() {
+  local s="$1"
+  [[ "$s" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]
+}
+
+slug_from_path() {
+  local base s
+  base="$(basename "$(realpath -m -- "$1")")"
+  s="$(printf '%s' "$base" | tr -c 'a-zA-Z0-9._-' '-')"
+  while [ -n "$s" ] && [[ ! "${s:0:1}" =~ [a-zA-Z0-9] ]]; do
+    s="${s:1}"
+  done
+  [ -n "$s" ] || s="workspace"
+  printf '%s\n' "$s"
+}
+
 # ---------- workspace discovery ----------
 find_workspace() {
   local d="$PWD"
@@ -28,6 +47,216 @@ find_workspace() {
     d="$(dirname "$d")"
   done
   return 1
+}
+
+install_claude_hooks() {
+  local settings="$1"
+  local bin_link="$2"
+  local settings_dir tmp input backup_ts
+
+  settings_dir="$(dirname "$settings")"
+  mkdir -p "$settings_dir" || die "install: cannot create settings dir '$settings_dir'"
+
+  if [ -f "$settings" ]; then
+    jq -e 'type == "object" and ((has("hooks") | not) or (.hooks | type == "object"))' "$settings" >/dev/null 2>&1 \
+      || die "install: existing Claude settings must be a valid JSON object with object-valued hooks: $settings"
+    input="$settings"
+  else
+    input="$(mktemp "$settings_dir/settings.empty.XXXXXX")" \
+      || die "install: cannot create temporary settings file"
+    printf '{}\n' > "$input"
+  fi
+
+  tmp="$(mktemp "$settings.tmp.XXXXXX")" \
+    || die "install: cannot create temporary settings file"
+  jq --arg bin "$bin_link" '
+    def entry($event):
+      if $event == "Notification" then
+        {
+          matcher: "idle_prompt|permission_prompt",
+          hooks: [{type: "command", command: ($bin + " hook " + $event)}]
+        }
+      else
+        {
+          hooks: [{type: "command", command: ($bin + " hook " + $event)}]
+        }
+      end;
+    def has_cockpit_hook:
+      any(.hooks[]?; ((.command // "") | contains("cc-cockpit hook ")));
+    def upsert($event):
+      .hooks[$event] = (((.hooks[$event] // []) | map(select(has_cockpit_hook | not))) + [entry($event)]);
+    .hooks = (.hooks // {})
+    | upsert("SessionStart")
+    | upsert("UserPromptSubmit")
+    | upsert("PermissionRequest")
+    | upsert("Notification")
+    | upsert("PostToolUse")
+    | upsert("Stop")
+    | upsert("SessionEnd")
+  ' "$input" > "$tmp" \
+    || die "install: failed to merge Claude hooks into settings"
+
+  if [ -f "$settings" ] && cmp -s "$tmp" "$settings"; then
+    rm -f "$tmp"
+    [ "$input" = "$settings" ] || rm -f "$input"
+    return 0
+  fi
+
+  if [ -f "$settings" ]; then
+    backup_ts="$(date +%Y%m%d-%H%M%S)"
+    cp "$settings" "$settings.bak-$backup_ts" \
+      || die "install: cannot back up '$settings'"
+  fi
+
+  mv "$tmp" "$settings" || die "install: cannot write '$settings'"
+  [ "$input" = "$settings" ] || rm -f "$input"
+}
+
+# ============================================================
+# cmd: install
+# ============================================================
+cmd_install() {
+  local bin_dir="${CC_COCKPIT_BIN_DIR:-$HOME/.local/bin}"
+  local settings="${CLAUDE_SETTINGS_PATH:-$HOME/.claude/settings.json}"
+  local install_bin=1 install_hooks=1
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --bin-dir)
+        [ $# -ge 2 ] || die "install: --bin-dir requires a value"
+        bin_dir="$2"; shift 2 ;;
+      --settings)
+        [ $# -ge 2 ] || die "install: --settings requires a value"
+        settings="$2"; shift 2 ;;
+      --no-bin) install_bin=0; shift ;;
+      --no-hooks) install_hooks=0; shift ;;
+      *) die "install: unknown flag '$1'" ;;
+    esac
+  done
+
+  command -v jq >/dev/null || die "install: jq not found on PATH"
+
+  local bin_link="$bin_dir/cc-cockpit"
+  if [ "$install_bin" -eq 1 ]; then
+    mkdir -p "$bin_dir" || die "install: cannot create bin dir '$bin_dir'"
+    ln -sf "$__bin_real" "$bin_link" || die "install: cannot symlink '$bin_link'"
+    echo "install: installed $bin_link -> $__bin_real"
+  fi
+
+  if [ "$install_hooks" -eq 1 ]; then
+    install_claude_hooks "$settings" "$bin_link"
+    echo "install: installed Claude Code hooks in $settings"
+  fi
+
+  command -v zellij >/dev/null || echo "install: warning: zellij not found on PATH" >&2
+  command -v claude >/dev/null || echo "install: warning: claude not found on PATH" >&2
+  echo "install: done"
+}
+
+add_repo_spec() {
+  local root="$1" key="$2" path="$3"
+  local root_real abs rel existing
+
+  valid_slug "$key" || die "init: invalid repo label '$key' (must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$)"
+  for existing in "${INIT_REPO_KEYS[@]}"; do
+    [ "$existing" != "$key" ] || die "init: duplicate repo label '$key'; pass explicit labels like api=packages/api"
+  done
+
+  root_real="$(realpath -- "$root")" || die "init: cannot canonicalize workspace root"
+  if [[ "$path" = /* ]]; then
+    abs="$(realpath -m -- "$path")"
+  else
+    abs="$(realpath -m -- "$root/$path")"
+  fi
+  case "$abs/" in
+    "$root_real"/?*/) : ;;
+    *) die "init: repo '$key' resolves outside workspace root: $path" ;;
+  esac
+  [ -d "$abs" ] || die "init: repo dir does not exist: $path"
+  git -C "$abs" rev-parse --git-dir >/dev/null 2>&1 \
+    || die "init: '$path' is not a git repo"
+
+  rel="$(realpath --relative-to="$root_real" "$abs")" \
+    || die "init: cannot compute relative path for '$path'"
+  INIT_REPO_KEYS+=("$key")
+  INIT_REPO_PATHS+=("$rel")
+}
+
+# ============================================================
+# cmd: init
+# ============================================================
+cmd_init() {
+  local name="" force=0 root="$PWD"
+  local specs=()
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name)
+        [ $# -ge 2 ] || die "init: --name requires a value"
+        name="$2"; shift 2 ;;
+      --force) force=1; shift ;;
+      -*) die "init: unknown flag '$1'" ;;
+      *) specs+=("$1"); shift ;;
+    esac
+  done
+
+  [ -n "$name" ] || name="$(slug_from_path "$root")"
+  valid_slug "$name" || die "init: invalid workspace name '$name' (must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$)"
+
+  INIT_REPO_KEYS=()
+  INIT_REPO_PATHS=()
+
+  if [ "${#specs[@]}" -gt 0 ]; then
+    local spec key path
+    for spec in "${specs[@]}"; do
+      if [[ "$spec" == *=* ]]; then
+        key="${spec%%=*}"
+        path="${spec#*=}"
+      else
+        path="$spec"
+        key="$(slug_from_path "$path")"
+      fi
+      [ -n "$path" ] || die "init: empty path in repo spec '$spec'"
+      add_repo_spec "$root" "$key" "$path"
+    done
+  else
+    local gitdir repo_dir key
+    while IFS= read -r gitdir; do
+      repo_dir="$(dirname "$gitdir")"
+      key="$(slug_from_path "$repo_dir")"
+      add_repo_spec "$root" "$key" "$repo_dir"
+    done < <(find "$root" -mindepth 2 -maxdepth 4 -type d -name .git -prune -print | sort)
+  fi
+
+  [ "${#INIT_REPO_KEYS[@]}" -gt 0 ] \
+    || die "init: no child git repos found. Run from a workspace parent or pass repo specs like api=packages/api"
+
+  local ws_dir="$root/.cc-cockpit"
+  local ws_json="$ws_dir/workspace.json"
+  if [ -e "$ws_json" ] && [ "$force" -ne 1 ]; then
+    die "init: workspace already exists at $ws_json (use --force to rewrite)"
+  fi
+
+  mkdir -p "$ws_dir" || die "init: cannot create '$ws_dir'"
+
+  local repos_json tmp i
+  repos_json="$(
+    for i in "${!INIT_REPO_KEYS[@]}"; do
+      printf '%s\t%s\n' "${INIT_REPO_KEYS[$i]}" "${INIT_REPO_PATHS[$i]}"
+    done | jq -Rn '[inputs | split("\t") | {key:.[0], value:.[1]}] | from_entries'
+  )" || die "init: cannot build repo JSON"
+
+  tmp="$ws_json.tmp.$$"
+  jq -n --arg n "$name" --argjson r "$repos_json" '{name:$n, repos:$r}' > "$tmp" \
+    || die "init: cannot write workspace JSON"
+  mv "$tmp" "$ws_json" || die "init: cannot replace '$ws_json'"
+
+  echo "init: wrote $ws_json"
+  echo "init: workspace '$name' with ${#INIT_REPO_KEYS[@]} repo(s)"
+  for i in "${!INIT_REPO_KEYS[@]}"; do
+    printf '  %s=%s\n' "${INIT_REPO_KEYS[$i]}" "${INIT_REPO_PATHS[$i]}"
+  done
+  echo "init: next: cc-cockpit open"
 }
 
 # ---------- shared: append event under flock ----------
@@ -65,7 +294,7 @@ append_event() {
 # ============================================================
 cmd_open() {
   local ws
-  ws="$(find_workspace)" || die "Not in a cc-cockpit workspace. Expected .cc-cockpit/workspace.json up the directory tree."
+  ws="$(find_workspace)" || die "Not in a cc-cockpit workspace. Run 'cc-cockpit init' from the workspace parent first."
 
   # Canonicalize workspace root — state binds to this exact path.
   local ws_canonical
@@ -159,12 +388,14 @@ cmd_open() {
 # ============================================================
 cmd_spawn() {
   local repo="" task="" related=""
+  local cmd_name="${CC_COCKPIT_CMD_NAME:-spawn}"
+  local positional=()
   while [ $# -gt 0 ]; do
     case "$1" in
       --repo|--task|--related)
         local flag="$1"
         if [ $# -lt 2 ] || [[ "$2" == --* ]]; then
-          die "spawn: $flag requires a value"
+          die "$cmd_name: $flag requires a value"
         fi
         case "$flag" in
           --repo)    repo="$2" ;;
@@ -173,48 +404,73 @@ cmd_spawn() {
         esac
         shift 2
         ;;
-      *) die "spawn: unknown flag '$1'" ;;
+      --)
+        shift
+        positional+=("$@")
+        break
+        ;;
+      -*)
+        die "$cmd_name: unknown flag '$1'"
+        ;;
+      *)
+        positional+=("$1")
+        shift
+        ;;
     esac
   done
-  [ -n "$repo" ] || die "spawn: --repo required"
-  [ -n "$task" ] || die "spawn: --task required"
-  [ -n "${ZELLIJ:-}" ] || die "spawn: must be run inside a Zellij session (launched by 'cc-cockpit open')"
-  [ -n "${CC_COCKPIT_HOME:-}" ] || die "spawn: CC_COCKPIT_HOME not set — run 'cc-cockpit open' first"
-  [ -n "${COCKPIT_STATE_HOME:-}" ] || die "spawn: COCKPIT_STATE_HOME not set"
-  [ -n "${CC_COCKPIT_WORKSPACE_ROOT:-}" ] || die "spawn: CC_COCKPIT_WORKSPACE_ROOT not set"
+  if [ "${#positional[@]}" -gt 0 ]; then
+    local task_start=0
+    if [ -z "$repo" ]; then
+      repo="${positional[0]}"
+      task_start=1
+    fi
+    if [ "$task_start" -lt "${#positional[@]}" ]; then
+      if [ -n "$task" ]; then
+        die "$cmd_name: unexpected positional task '${positional[$task_start]}'"
+      fi
+      task="${positional[*]:$task_start}"
+    fi
+  fi
+
+  [ -n "$repo" ] || die "$cmd_name: repo required (usage: cc-cockpit $cmd_name <repo> <task...>)"
+  [ -n "$task" ] || die "$cmd_name: task required (usage: cc-cockpit $cmd_name <repo> <task...>)"
+  [ -n "${ZELLIJ:-}" ] || die "$cmd_name: must be run inside a Zellij session (launched by 'cc-cockpit open')"
+  [ -n "${CC_COCKPIT_HOME:-}" ] || die "$cmd_name: CC_COCKPIT_HOME not set — run 'cc-cockpit open' first"
+  [ -n "${COCKPIT_STATE_HOME:-}" ] || die "$cmd_name: COCKPIT_STATE_HOME not set"
+  [ -n "${CC_COCKPIT_WORKSPACE_ROOT:-}" ] || die "$cmd_name: CC_COCKPIT_WORKSPACE_ROOT not set"
 
   local ws_json="$CC_COCKPIT_WORKSPACE_ROOT/.cc-cockpit/workspace.json"
   # Validate shape before indexing — a malformed .repos would error out of
   # jq with a confusing message.
   jq -e '.repos | type == "object"' "$ws_json" >/dev/null 2>&1 \
-    || die "spawn: workspace.json .repos must be an object { \"<label>\": \"<path>\", ... }"
+    || die "$cmd_name: workspace.json .repos must be an object { \"<label>\": \"<path>\", ... }"
   local rel
   rel="$(jq -r --arg k "$repo" '.repos[$k] // empty' "$ws_json")"
   if [ -z "$rel" ]; then
     local valid
     valid="$(jq -r '.repos | keys | join(", ")' "$ws_json")"
-    die "spawn: unknown repo '$repo'. Valid: $valid"
+    die "$cmd_name: unknown repo '$repo'. Valid: $valid"
   fi
 
   # Resolve + enforce containment. workspace.json values may be ../foo, absolute paths, or
   # symlinks — we canonicalize and require strict descendant of the canonical workspace root.
   local ws_root abs
-  ws_root="$(realpath -- "$CC_COCKPIT_WORKSPACE_ROOT")" || die "spawn: cannot canonicalize workspace root"
+  ws_root="$(realpath -- "$CC_COCKPIT_WORKSPACE_ROOT")" || die "$cmd_name: cannot canonicalize workspace root"
   abs="$(realpath -m -- "$CC_COCKPIT_WORKSPACE_ROOT/$rel")"
   case "$abs/" in
     "$ws_root"/?*/) : ;;
-    *) die "spawn: repo '$repo' resolves outside workspace root.
+    *) die "$cmd_name: repo '$repo' resolves outside workspace root.
     resolved: $abs
     workspace: $ws_root" ;;
   esac
-  [ -d "$abs" ] || die "spawn: repo dir does not exist: $abs"
+  [ -d "$abs" ] || die "$cmd_name: repo dir does not exist: $abs"
 
   # Enforce "child repo is a real git repo" invariant.
   if ! git -C "$abs" rev-parse --git-dir >/dev/null 2>&1; then
-    die "spawn: '$abs' is not a git repo. cc-cockpit only spawns in real child repos (run 'git init' there if you meant to)."
+    die "$cmd_name: '$abs' is not a git repo. cc-cockpit only spawns in real child repos (run 'git init' there if you meant to)."
   fi
 
-  command -v claude >/dev/null || die "spawn: 'claude' not found on PATH"
+  command -v claude >/dev/null || die "$cmd_name: 'claude' not found on PATH"
 
   local pane_name="${repo}: ${task}"
   # Truncate pane name to something reasonable
@@ -391,20 +647,37 @@ cmd_hook() {
 # ============================================================
 case "${1:-}" in
   --version|-v) echo "cc-cockpit $VERSION" ;;
+  install)      shift; cmd_install "$@" ;;
+  setup)        shift; cmd_install "$@" ;;
+  init)         shift; cmd_init "$@" ;;
   open)         shift; cmd_open "$@" ;;
-  spawn)        shift; cmd_spawn "$@" ;;
+  start)        shift; CC_COCKPIT_CMD_NAME=start cmd_spawn "$@" ;;
+  spawn)        shift; CC_COCKPIT_CMD_NAME=spawn cmd_spawn "$@" ;;
   mark-ended)   shift; cmd_mark_ended "$@" ;;
   hook)         shift; cmd_hook "$@" ;;
   help|--help|"") cat <<EOF
 cc-cockpit $VERSION
 
 Usage:
+  cc-cockpit install [--bin-dir DIR] [--settings FILE] [--no-bin] [--no-hooks]
+      Install the cc-cockpit command on PATH and install Claude Code hooks.
+
+  cc-cockpit init [--name NAME] [--force] [repo=path ...]
+      Create .cc-cockpit/workspace.json in the current directory. With no repo
+      specs, auto-discovers child git repos below the current directory.
+
   cc-cockpit open
-      Detect .cc-cockpit/workspace.json up from cwd, init state, launch Zellij.
+      Open the cockpit for the workspace containing your cwd.
+
+  cc-cockpit start <repo> <task...> [--related A,B]
+      (run from a Zellij pane inside 'open') Create a new pane running Claude
+      in the repo referenced by <repo> in workspace.json.
+
+  cc-cockpit spawn <repo> <task...> [--related A,B]
+      Alias-compatible spelling for start.
 
   cc-cockpit spawn --repo <key> --task "<text>" [--related A,B]
-      (run from a Zellij pane inside 'open') Create a new pane running Claude
-      in the repo referenced by <key> in workspace.json.
+      Backward-compatible flag form.
 
   cc-cockpit mark-ended <sid-prefix | all-non-ended>
       Append a synthetic SessionEnd for stale sessions (no SessionEnd emitted,

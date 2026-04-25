@@ -42,7 +42,7 @@ jq -r '
   | map(select(.value.status != "ended"))
   | sort_by(.value.started_at)
   | if length == 0 then
-      "  (no active sessions — spawn one: cc-cockpit spawn --repo <key> --task \"...\")"
+      "  (no active sessions — start one: cc-cockpit start <repo> <task...>)"
     else
       ([["STATUS","SID","REPO","TASK","ACT"]] + (map([
           "\(.value.status | glyph) \(.value.status)",

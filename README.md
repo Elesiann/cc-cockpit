@@ -29,8 +29,10 @@ This is the differentiator. **Agent orchestrators locked to one git repo are leg
 
 ## What it does
 
-- **`cc-cockpit open`** — walks up from your cwd until it finds `.cc-cockpit/workspace.json`, boots a Zellij session with a dashboard pane and a control shell.
-- **`cc-cockpit spawn --repo api --task "fix auth bug"`** — opens a new pane to the right running Claude Code inside the `api` child repo, with the right env wired in.
+- **`cc-cockpit install`** — installs the `cc-cockpit` command on `PATH` and wires the Claude Code hooks.
+- **`cc-cockpit init`** — creates `.cc-cockpit/workspace.json` from the child git repos in a workspace directory.
+- **`cc-cockpit open`** — opens the cockpit for that workspace.
+- **`cc-cockpit start api fix auth bug`** — opens a new pane running Claude Code inside the `api` child repo, with the right env wired in.
 - **Dashboard** — auto-updates every 0.5s, shows status (`running` / `waiting_input` / `idle` / `ended`) for every session, rings the terminal bell the moment any agent enters `waiting_input`.
 
 All of this is bash + jq + Zellij. A few hundred lines of shell, no daemon, no background process, no database — just an event-sourced append log per workspace and a deterministic reducer.
@@ -41,8 +43,8 @@ All of this is bash + jq + Zellij. A few hundred lines of shell, no daemon, no b
 
 ```
 ┌─── cc-cockpit dashboard ───────────┬─── control ────────────────────────┐
-│  cc-cockpit · veecode-saas         │ $ cc-cockpit spawn --repo api      │
-│  active=3 (running=2 waiting=1)    │      --task "fix auth bug"         │
+│  cc-cockpit · veecode-saas         │ $ cc-cockpit start api fix bug     │
+│  active=3 (running=2 waiting=1)    │ $                                  │
 │                                    │ $                                  │
 │  STATUS         SID       REPO     │                                    │
 │  ▶ running      a7b2...   api      │                                   │
@@ -67,7 +69,7 @@ Three planes you always have in your head:
 
 ┌─── Control plane ───┐    ┌─── Observation plane ───┐
 │ cc-cockpit CLI      │    │ dashboard pane          │
-│   open / spawn /    │    │ (read-only view of      │
+│   open / start /    │    │ (read-only view of      │
 │   mark-ended / hook │    │  sessions + bell on     │
 │                     │    │  waiting_input)         │
 └─────────────────────┘    └─────────────────────────┘
@@ -97,27 +99,18 @@ Three planes you always have in your head:
 
 ---
 
-## Install (one-time)
+## Install
 
 ```bash
-# 1. clone the repo wherever you like
+# clone the cockpit source wherever you like
 git clone https://github.com/<you>/cc-cockpit.git ~/cc-cockpit
 cd ~/cc-cockpit
 
-# 2. symlink the binary onto PATH
-mkdir -p ~/.local/bin
-ln -sf "$PWD/.cc-cockpit/bin/cc-cockpit" ~/.local/bin/cc-cockpit
-
-# 3. back up global Claude Code settings, then merge the hook snippet
-cp ~/.claude/settings.json ~/.claude/settings.json.bak-$(date +%Y%m%d-%H%M%S)
-# open ~/.claude/settings.json and merge the contents of
-# .cc-cockpit/examples/settings.snippet.json
-# replacing /home/YOUR_USER with your actual home path.
-
-# 4. verify
-cc-cockpit --version     # → cc-cockpit 0.1.0-mvp
-which zellij             # → must exist
+# install the cc-cockpit command and Claude Code hooks
+./install
 ```
+
+No manual hook merge is needed. `./install` creates `~/.local/bin/cc-cockpit`, backs up `~/.claude/settings.json` if it must change, and installs the hook entries idempotently.
 
 The `Notification` hook uses `matcher: "idle_prompt|permission_prompt"` — this is the real signal that Claude is waiting on you (validated empirically against real Claude Code payloads before the hook was wired).
 
@@ -126,21 +119,26 @@ The `Notification` hook uses `matcher: "idle_prompt|permission_prompt"` — this
 ## Create a workspace
 
 ```bash
-mkdir -p ~/my-workspace/.cc-cockpit
-cat > ~/my-workspace/.cc-cockpit/workspace.json <<'EOF'
-{
-  "name": "my-workspace",
-  "repos": {
-    "api": "packages/api",
-    "web": "packages/web",
-    "infra": "infra"
-  }
-}
-EOF
-
-# Put (or symlink, or clone) the real git repos at those paths.
+# Put, symlink, or clone the real git repos below a workspace parent.
 # The parent directory does NOT need to be a git repo itself.
-mkdir -p ~/my-workspace/packages/api ~/my-workspace/packages/web ~/my-workspace/infra
+mkdir -p ~/my-workspace
+cd ~/my-workspace
+
+# Initialize the workspace config.
+cc-cockpit init
+```
+
+Then open the cockpit:
+
+```bash
+cc-cockpit open
+```
+
+For an explicit layout, initialize once before opening:
+
+```bash
+cc-cockpit init --name my-workspace api=packages/api web=packages/web infra=infra
+cc-cockpit open
 ```
 
 **Rules about `workspace.json`:**
@@ -157,8 +155,8 @@ mkdir -p ~/my-workspace/packages/api ~/my-workspace/packages/web ~/my-workspace/
 ## Daily workflow
 
 ```bash
-# enter any dir inside the workspace and open the cockpit
-cd ~/my-workspace/packages/api
+# enter the workspace parent, or any dir inside it, and open the cockpit
+cd ~/my-workspace
 cc-cockpit open
 ```
 
@@ -171,9 +169,9 @@ This walks up until it finds `.cc-cockpit/workspace.json`, initializes state, an
 └───────────────────────────┴────────────────────────────┘
 ```
 
-**Spawn a session** (from the control pane):
+**Start a session** (from the control pane):
 ```bash
-cc-cockpit spawn --repo api --task "fix auth bug"
+cc-cockpit start api fix auth bug
 ```
 
 A Claude pane opens in a bottom row below the dashboard/control pair. Additional spawned sessions share that bottom row. Dashboard updates in ≤1s.
@@ -201,8 +199,11 @@ Dismissal is non-terminal: if the matched session turns out to still be live, th
 
 | Command | Use |
 |---|---|
-| `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. Silent `exec zellij` → all subsequent work happens in that Zellij. |
-| `cc-cockpit spawn --repo <key> --task "<text>"` | Open a new Zellij pane to the right running Claude in `repos[<key>]`. Run from inside the Zellij (control pane). |
+| `cc-cockpit install` | Install the command on `PATH` and install Claude Code hooks. Usually run via `./install` from the cloned source tree. |
+| `cc-cockpit init [--name NAME] [repo=path ...]` | Create `.cc-cockpit/workspace.json`; with no repo specs, auto-discovers child git repos. |
+| `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
+| `cc-cockpit start <repo> <task...>` | Open a new Zellij pane running Claude in `repos[<repo>]`. Run from inside the Zellij (control pane). |
+| `cc-cockpit spawn <repo> <task...>` | Compatibility alias for `start`; the old `spawn --repo <key> --task "<text>"` form still works. |
 | `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **non-terminal**: if the session was actually still live, any later event from it (prompt, tool use, notification) un-dismisses it. Prefixes that match more than one session require `--yes`. |
 | `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session (e.g. after a full Zellij restart). `--yes` required because this always matches multiple sessions. |
 | `cc-cockpit hook <Event>` | **Internal.** Called from `~/.claude/settings.json`. Do not invoke by hand. |
@@ -222,7 +223,7 @@ Dismissal is non-terminal: if the matched session turns out to still be live, th
 
 ## How it works (30-second version)
 
-1. When you `spawn`, `cc-cockpit` invokes `zellij action new-pane ... env COCKPIT_SESSION_ACTIVE=1 ... claude`.
+1. When you `start`, `cc-cockpit` invokes `zellij action new-pane ... env COCKPIT_SESSION_ACTIVE=1 ... claude`.
 2. The `SessionStart` hook in `~/.claude/settings.json` fires. It's a silent no-op unless `COCKPIT_SESSION_ACTIVE=1` — so global hooks don't pollute non-cockpit Claude sessions.
 3. Every event (`SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`) appends an envelope to `events.jsonl` under an exclusive `flock`. Sequence numbers are monotonic; wall-clock is advisory.
 4. The dashboard pane loops every 0.5s: snapshots the log under a shared `flock`, runs a pure-jq reducer to produce `current.json`, renders, and rings the bell on new `waiting_input` entrants.
@@ -236,11 +237,13 @@ Everything else is consequences of those five points.
 
 ## Nuances & troubleshooting
 
-**"Not in a cc-cockpit workspace"** — you're outside any dir whose ancestors contain `.cc-cockpit/workspace.json`. Either `cd` into one, or bootstrap it.
+**"Not in a cc-cockpit workspace"** — you're outside any dir whose ancestors contain `.cc-cockpit/workspace.json`. `cd` into one, or run `cc-cockpit init` from the workspace parent first.
 
-**"spawn: must be run inside a Zellij session"** — `cc-cockpit spawn` only works from a pane opened by `cc-cockpit open` (needs `$ZELLIJ` in env). Run `cc-cockpit open` first.
+**"init: no child git repos found"** — you're outside a workspace parent, or the repos have not been cloned/symlinked yet. `cd` to the directory that contains the child repos, or run `cc-cockpit init --name <name> label=path`.
 
-**"spawn: unknown repo 'X'"** — the label isn't in `.repos`. The error lists valid labels.
+**"start: must be run inside a Zellij session"** — `cc-cockpit start` only works from a pane opened by the cockpit (needs `$ZELLIJ` in env). Run `cc-cockpit open` first.
+
+**"start: unknown repo 'X'"** — the label isn't in `.repos`. The error lists valid labels.
 
 **Dashboard shows ghost sessions from a previous Zellij** — runtime state persists across Zellij restarts (by design — it's event-sourced). Use `cc-cockpit mark-ended <prefix>` to dismiss.
 
@@ -292,6 +295,7 @@ Most are on the v1.1/v1.5 roadmap.
 <this repo>/
 ├── README.md
 ├── LICENSE
+├── install                          ← one-time installer wrapper
 └── .cc-cockpit/
     ├── bin/cc-cockpit                 ← the binary (bash, single file)
     ├── reduce-state.sh                ← pure-jq reducer, events.jsonl → current.json
@@ -317,9 +321,11 @@ $XDG_STATE_HOME/cc-cockpit/<name>/     ← runtime state (never committed)
 ## One-screen summary
 
 ```
-cd into workspace  →  cc-cockpit open  →  Zellij opens (dashboard | control)
+install once  →  ./install
+workspace once  →  cc-cockpit init
+daily  →  cc-cockpit open  →  Zellij opens (dashboard | control)
          ↓
-control pane  →  cc-cockpit spawn --repo X --task "..."  →  new claude pane appears
+control pane  →  cc-cockpit start X do the thing  →  new claude pane appears
          ↓
 dashboard auto-updates, bell on waiting_input
          ↓

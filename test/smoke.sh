@@ -49,6 +49,36 @@ make_ws() {
 }
 
 # =============================================================
+echo '[0] install installs PATH symlink and Claude hooks'
+# =============================================================
+SETTINGS="$SANDBOX/claude/settings.json"
+mkdir -p "$(dirname "$SETTINGS")"
+cat > "$SETTINGS" <<EOF
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo keep"}]}]}}
+EOF
+out="$("$HERE/install" --bin-dir "$SANDBOX/bin" --settings "$SETTINGS" 2>&1)"
+rc=$?
+session_start_count="$(jq '[.hooks.SessionStart[] | .hooks[]? | select(.command | contains("cc-cockpit hook SessionStart"))] | length' "$SETTINGS")"
+notification_matcher="$(jq -r '.hooks.Notification[-1].matcher' "$SETTINGS")"
+preserved_stop="$(jq '[.hooks.Stop[] | .hooks[]? | select(.command == "echo keep")] | length' "$SETTINGS")"
+if [ "$rc" -eq 0 ] \
+   && [ -L "$SANDBOX/bin/cc-cockpit" ] \
+   && [ "$(readlink -f "$SANDBOX/bin/cc-cockpit")" = "$(readlink -f "$BIN")" ] \
+   && [ "$session_start_count" = "1" ] \
+   && [ "$notification_matcher" = "idle_prompt|permission_prompt" ] \
+   && [ "$preserved_stop" = "1" ]; then
+  pass 'install symlinks binary, installs hooks, preserves unrelated hooks'
+else
+  fail "install failed: rc=$rc out='$out' session_start_count=$session_start_count notification_matcher=$notification_matcher preserved_stop=$preserved_stop"
+fi
+
+out="$("$BIN" install --bin-dir "$SANDBOX/bin" --settings "$SETTINGS" 2>&1)"
+session_start_count="$(jq '[.hooks.SessionStart[] | .hooks[]? | select(.command | contains("cc-cockpit hook SessionStart"))] | length' "$SETTINGS")"
+[ "$session_start_count" = "1" ] \
+  && pass 'install is idempotent for cc-cockpit hooks' \
+  || fail "install duplicated hooks: count=$session_start_count out='$out'"
+
+# =============================================================
 echo '[1] hook silent without COCKPIT_SESSION_ACTIVE'
 # =============================================================
 unset COCKPIT_SESSION_ACTIVE COCKPIT_STATE_HOME
@@ -85,7 +115,57 @@ for bad in '../evil' 'foo/bar' '.hidden' '' 'a b'; do
 done
 
 # =============================================================
-echo '[3] canonical-root binding blocks name collision'
+echo '[3] init bootstraps workspace.json'
+# =============================================================
+mkdir -p "$SANDBOX/ws-init/packages/api" "$SANDBOX/ws-init/web"
+(cd "$SANDBOX/ws-init/packages/api" && git init -q)
+(cd "$SANDBOX/ws-init/web" && git init -q)
+out="$(cd "$SANDBOX/ws-init" && "$BIN" init --name initws 2>&1)"
+rc=$?
+api_path="$(jq -r '.repos.api // empty' "$SANDBOX/ws-init/.cc-cockpit/workspace.json")"
+web_path="$(jq -r '.repos.web // empty' "$SANDBOX/ws-init/.cc-cockpit/workspace.json")"
+if [ "$rc" -eq 0 ] \
+   && [ "$api_path" = "packages/api" ] \
+   && [ "$web_path" = "web" ]; then
+  pass 'init auto-discovers child git repos'
+else
+  fail "init discovery failed: rc=$rc out='$out' api=$api_path web=$web_path"
+fi
+
+out="$(cd "$SANDBOX/ws-init" && "$BIN" init --name initws 2>&1)"
+rc=$?
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'workspace already exists'; then
+  pass 'init refuses to overwrite workspace.json without --force'
+else
+  fail "init overwrite guard failed: rc=$rc out='$out'"
+fi
+
+mkdir -p "$SANDBOX/ws-explicit/services/api"
+(cd "$SANDBOX/ws-explicit/services/api" && git init -q)
+out="$(cd "$SANDBOX/ws-explicit" && "$BIN" init --name explicit api=services/api 2>&1)"
+rc=$?
+explicit_path="$(jq -r '.repos.api // empty' "$SANDBOX/ws-explicit/.cc-cockpit/workspace.json")"
+[ "$rc" -eq 0 ] && [ "$explicit_path" = "services/api" ] \
+  && pass 'init accepts explicit repo=path specs' \
+  || fail "init explicit failed: rc=$rc out='$out' path=$explicit_path"
+
+mkdir -p "$SANDBOX/open-fake-bin"
+cat > "$SANDBOX/open-fake-bin/zellij" <<EOF
+#!/bin/bash
+printf '%s\n' "\$@" > "$SANDBOX/open-zellij.args"
+EOF
+chmod +x "$SANDBOX/open-fake-bin/zellij"
+out="$(cd "$SANDBOX/ws-init" && PATH="$SANDBOX/open-fake-bin:$PATH" "$BIN" open 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] \
+   && grep -qx -- '--layout' "$SANDBOX/open-zellij.args"; then
+  pass 'open launches Zellij for an initialized workspace'
+else
+  fail "open failed: rc=$rc out='$out' args='$(cat "$SANDBOX/open-zellij.args" 2>/dev/null)'"
+fi
+
+# =============================================================
+echo '[4] canonical-root binding blocks name collision'
 # =============================================================
 mkdir -p "$SANDBOX/ws-a/child" "$SANDBOX/ws-b/child"
 (cd "$SANDBOX/ws-a/child" && git init -q)
@@ -106,7 +186,7 @@ else
 fi
 
 # =============================================================
-echo '[4] spawn containment + git-repo check'
+echo '[5] spawn containment + git-repo check'
 # =============================================================
 mkdir -p "$SANDBOX/ws-spawn/good" "$SANDBOX/ws-spawn/notgit" "$SANDBOX/outside-ws"
 (cd "$SANDBOX/ws-spawn/good" && git init -q)
@@ -149,10 +229,36 @@ else
   fail "spawn did not use auto-layout new-pane: rc=$rc out='$out' args='$(cat "$SANDBOX/zellij-spawn.args" 2>/dev/null)'"
 fi
 
+OLD_PATH="$PATH"
+export PATH="$FAKE_BIN:$PATH"
+out="$("$BIN" start good shorthand task 2>&1)"
+rc=$?
+export PATH="$OLD_PATH"
+if [ "$rc" -eq 0 ] \
+   && grep -qx -- 'good: shorthand task' "$SANDBOX/zellij-spawn.args" \
+   && grep -qx -- 'COCKPIT_TASK_NAME=shorthand task' "$SANDBOX/zellij-spawn.args"; then
+  pass 'start accepts repo plus unquoted task words'
+else
+  fail "start shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/zellij-spawn.args" 2>/dev/null)'"
+fi
+
+OLD_PATH="$PATH"
+export PATH="$FAKE_BIN:$PATH"
+out="$("$BIN" spawn good positional task 2>&1)"
+rc=$?
+export PATH="$OLD_PATH"
+if [ "$rc" -eq 0 ] \
+   && grep -qx -- 'good: positional task' "$SANDBOX/zellij-spawn.args" \
+   && grep -qx -- 'COCKPIT_TASK_NAME=positional task' "$SANDBOX/zellij-spawn.args"; then
+  pass 'spawn accepts shorthand repo plus task words'
+else
+  fail "spawn shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/zellij-spawn.args" 2>/dev/null)'"
+fi
+
 unset ZELLIJ CC_COCKPIT_HOME COCKPIT_STATE_HOME CC_COCKPIT_WORKSPACE_ROOT COCKPIT_WORKSPACE_NAME
 
 # =============================================================
-echo '[5] spawn rejects flags without values cleanly'
+echo '[6] spawn rejects flags without values cleanly'
 # =============================================================
 for flag in --repo --task --related; do
   out="$("$BIN" spawn "$flag" 2>&1)"
@@ -177,7 +283,7 @@ else
 fi
 
 # =============================================================
-echo '[6] initial layout has bottom spawn row swap layout'
+echo '[7] initial layout has bottom spawn row swap layout'
 # =============================================================
 if grep -q 'swap_tiled_layout name="cc-cockpit"' "$LAYOUT" \
    && grep -q 'tab min_panes=3' "$LAYOUT" \
@@ -188,7 +294,7 @@ else
 fi
 
 # =============================================================
-echo '[7] reducer tolerates malformed events'
+echo '[8] reducer tolerates malformed events'
 # =============================================================
 cat > "$SANDBOX/events-bad.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"r","declared_related_repos":[],"task_name":"t","cwd":"/x"}}
@@ -205,7 +311,7 @@ status="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status'
   || fail "reducer: dropped=$dropped, status=$status (expected 4, idle)"
 
 # =============================================================
-echo '[8] render fails loudly on corrupt current.json'
+echo '[9] render fails loudly on corrupt current.json'
 # =============================================================
 cat > "$SANDBOX/current-badtime.json" <<EOF
 {"sessions":{"s1":{"status":"running","started_at":"not-a-date","last_activity":"not-a-date","primary_repo":"r","task_name":"t"}},"dropped_events":0}
@@ -219,7 +325,7 @@ else
 fi
 
 # =============================================================
-echo '[9] mark-ended tolerates empty current sessions'
+echo '[10] mark-ended tolerates empty current sessions'
 # =============================================================
 mkdir -p "$SANDBOX/mark-empty"
 touch "$SANDBOX/mark-empty/events.jsonl"
@@ -235,7 +341,7 @@ else
 fi
 
 # =============================================================
-echo '[10] bell event-delta: Notification counts even when reducer collapses'
+echo '[11] bell event-delta: Notification counts even when reducer collapses'
 # =============================================================
 cat > "$SANDBOX/events-transient.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
@@ -254,7 +360,7 @@ collapsed="$("$REDUCER" < "$SANDBOX/events-transient.jsonl" | jq -r '.sessions.s
   || fail "bell or collapse broken: attn=$attn status=$collapsed"
 
 # =============================================================
-echo '[11] synthetic SessionEnd revivable; natural stays terminal'
+echo '[12] synthetic SessionEnd revivable; natural stays terminal'
 # =============================================================
 cat > "$SANDBOX/events-dismiss.jsonl" <<EOF
 {"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"a","payload":{"primary_repo":"r","task_name":"ta","declared_related_repos":[]}}
@@ -271,7 +377,7 @@ b_status="$("$REDUCER" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.st
   || fail "dismissal logic broken: a=$a_status (want running), b=$b_status (want ended)"
 
 # =============================================================
-echo '[12] reducer determinism'
+echo '[13] reducer determinism'
 # =============================================================
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r1"
 "$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r2"
