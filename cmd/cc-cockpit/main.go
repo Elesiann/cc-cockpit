@@ -392,8 +392,8 @@ func runHook(args []string) int {
 	}
 	event := args[0]
 
-	if event == "PaneDied" {
-		return runPaneDiedHook(args[1:])
+	if event == "PaneExited" {
+		return runPaneExitedHook(args[1:])
 	}
 
 	if os.Getenv("COCKPIT_SESSION_ACTIVE") != "1" {
@@ -434,20 +434,18 @@ func runHook(args []string) int {
 	return 0
 }
 
-// runPaneDiedHook is fired by tmux's global pane-died hook. Looks up the
-// session whose SessionStart recorded the crashed pane and emits a synthetic
-// SessionEnd so the dashboard moves it to the ended footer.
-func runPaneDiedHook(args []string) int {
+// runPaneExitedHook fires from tmux's pane-exited hook. stateHome is embedded
+// in the hook command at install time so we don't depend on XDG_STATE_HOME
+// being set in the tmux server's env. Looks up the session whose SessionStart
+// recorded the dying pane and emits a synthetic SessionEnd.
+func runPaneExitedHook(args []string) int {
 	if len(args) < 2 {
 		return 0
 	}
-	sessionName, paneID := args[0], args[1]
-	if !workspace.ValidSlug(sessionName) || paneID == "" {
+	stateHome, paneID := args[0], args[1]
+	if stateHome == "" || paneID == "" {
 		return 0
 	}
-
-	stateRoot := envOrDefault("XDG_STATE_HOME", filepath.Join(homeDir(), ".local", "state"))
-	stateHome := filepath.Join(stateRoot, "cc-cockpit", sessionName)
 
 	f, err := os.Open(filepath.Join(stateHome, "events.jsonl"))
 	if err != nil {
@@ -470,7 +468,7 @@ func runPaneDiedHook(args []string) int {
 	if targetSID == "" {
 		return 0
 	}
-	_ = appendSyntheticEnd(stateHome, targetSID, "pane-died")
+	_ = appendSyntheticEnd(stateHome, targetSID, "pane-exited")
 	return 0
 }
 
@@ -554,8 +552,8 @@ func runInstall(args []string) int {
 		fmt.Printf("install: installed Claude Code hooks in %s\n", settings)
 	}
 
-	if _, err := exec.LookPath("zellij"); err != nil {
-		fmt.Fprintln(os.Stderr, "install: warning: zellij not found on PATH")
+	if _, err := exec.LookPath("tmux"); err != nil {
+		fmt.Fprintln(os.Stderr, "install: warning: tmux not found on PATH (need 3.0+)")
 	}
 	if _, err := exec.LookPath("claude"); err != nil {
 		fmt.Fprintln(os.Stderr, "install: warning: claude not found on PATH")
@@ -626,12 +624,13 @@ func runOpen(args []string) int {
 		}
 	}
 
-	// Install (or refresh) the global pane-died hook so a crashed Claude pane
-	// auto-emits a synthetic SessionEnd. Best-effort. Assumes selfPath has no
-	// shell metacharacters (spaces / single quotes); fine for typical install
-	// locations like ~/.local/bin/cc-cockpit.
+	// Install (or refresh) the global pane-exited hook so a crashed Claude
+	// pane auto-emits a synthetic SessionEnd. Embed stateHome at install time
+	// — tmux's run-shell inherits the server env, where XDG_STATE_HOME may not
+	// be set. Best-effort; assumes selfPath / stateHome have no shell
+	// metacharacters (spaces / quotes); fine for typical install locations.
 	if selfPath, err := resolveSelfPath(); err == nil {
-		_ = tmux.SetPaneDiedHook(selfPath + " hook PaneDied #{session_name} #{pane_id}")
+		_ = tmux.SetPaneExitedHook(selfPath + " hook PaneExited " + stateHome + " #{hook_pane}")
 	}
 
 	fmt.Printf("cc-cockpit: workspace=%s  state=%s\n", ws.Name, stateHome)
