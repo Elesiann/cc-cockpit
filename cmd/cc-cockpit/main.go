@@ -624,13 +624,14 @@ func runOpen(args []string) int {
 		}
 	}
 
-	// Install (or refresh) the global pane-exited hook so a crashed Claude
-	// pane auto-emits a synthetic SessionEnd. Embed stateHome at install time
-	// — tmux's run-shell inherits the server env, where XDG_STATE_HOME may not
-	// be set. Best-effort; assumes selfPath / stateHome have no shell
-	// metacharacters (spaces / quotes); fine for typical install locations.
+	// Install (or refresh) the per-session pane-exited hook so a crashed
+	// Claude pane auto-emits a synthetic SessionEnd. Per-session (not global)
+	// so opening another workspace doesn't stomp this one's hook. stateHome
+	// is embedded at install time — tmux's run-shell inherits the server env,
+	// where XDG_STATE_HOME may not be set. Best-effort; assumes selfPath /
+	// stateHome have no shell metacharacters.
 	if selfPath, err := resolveSelfPath(); err == nil {
-		_ = tmux.SetPaneExitedHook(selfPath + " hook PaneExited " + stateHome + " #{hook_pane}")
+		_ = tmux.SetPaneExitedHook(ws.Name, selfPath+" hook PaneExited "+stateHome+" #{hook_pane}")
 	}
 
 	fmt.Printf("cc-cockpit: workspace=%s  state=%s\n", ws.Name, stateHome)

@@ -60,15 +60,19 @@ func NewWindow(session, windowName, cwd string, env []string, command ...string)
 	return strings.TrimSpace(string(out)), nil
 }
 
-// SetPaneExitedHook installs shellCmd as the global pane-exited hook on our
-// server. tmux fires pane-exited when a pane's process dies (the case for
+// SetPaneExitedHook installs shellCmd as the pane-exited hook for one tmux
+// session. tmux fires pane-exited when a pane's process dies (the case for
 // crashed Claude sessions). It does NOT fire on `kill-pane` / `kill-window`,
 // which are operator actions.
 //
+// Per-session (-t session) instead of global (-g) so opening a second
+// workspace doesn't overwrite the first's hook — each session keeps its own
+// stateHome embedded.
+//
 // Use #{hook_pane} for the dying pane's id; #{pane_id} resolves to the
 // currently-focused pane in hook context, which is wrong here.
-func SetPaneExitedHook(shellCmd string) error {
-	return cmd("set-hook", "-g", "pane-exited", "run-shell "+shellCmd).Run()
+func SetPaneExitedHook(session, shellCmd string) error {
+	return cmd("set-hook", "-t", session, "pane-exited", "run-shell "+shellCmd).Run()
 }
 
 // Version returns tmux's reported version string (e.g. "tmux 3.4").
