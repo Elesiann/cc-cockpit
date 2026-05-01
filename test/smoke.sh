@@ -155,32 +155,40 @@ explicit_path="$(jq -r '.repos.api // empty' "$SANDBOX/ws-explicit/.cc-cockpit/w
   || fail "init explicit failed: rc=$rc out='$out' path=$explicit_path"
 
 mkdir -p "$SANDBOX/open-fake-bin"
-cat > "$SANDBOX/open-fake-bin/zellij" <<EOF
+cat > "$SANDBOX/open-fake-bin/tmux" <<EOF
 #!/bin/bash
-printf '%s\n' "\$@" > "$SANDBOX/open-zellij.args"
+printf '%s\n' "\$@" >> "$SANDBOX/open-tmux.args"
+case " \$* " in
+  *" has-session "*) exit 1 ;;
+esac
+exit 0
 EOF
-chmod +x "$SANDBOX/open-fake-bin/zellij"
+chmod +x "$SANDBOX/open-fake-bin/tmux"
 out="$(cd "$SANDBOX/ws-init" && PATH="$SANDBOX/open-fake-bin:$PATH" "$BIN" open 2>&1)"
 rc=$?
 if [ "$rc" -eq 0 ] \
-   && grep -qx -- '--layout' "$SANDBOX/open-zellij.args"; then
-  pass 'open launches Zellij for an initialized workspace'
+   && grep -qx -- 'new-session' "$SANDBOX/open-tmux.args" \
+   && grep -qx -- 'attach-session' "$SANDBOX/open-tmux.args"; then
+  pass 'open launches tmux for an initialized workspace'
 else
-  fail "open failed: rc=$rc out='$out' args='$(cat "$SANDBOX/open-zellij.args" 2>/dev/null)'"
+  fail "open failed: rc=$rc out='$out' args='$(cat "$SANDBOX/open-tmux.args" 2>/dev/null)'"
 fi
 
 # =============================================================
 echo '[4] doctor validates install and workspace health'
 # =============================================================
-cat > "$SANDBOX/bin/zellij" <<'EOF'
+cat > "$SANDBOX/bin/tmux" <<'EOF'
 #!/bin/bash
+case "$1" in
+  -V) echo "tmux 3.4"; exit 0 ;;
+esac
 exit 0
 EOF
 cat > "$SANDBOX/bin/claude" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
-chmod +x "$SANDBOX/bin/zellij" "$SANDBOX/bin/claude"
+chmod +x "$SANDBOX/bin/tmux" "$SANDBOX/bin/claude"
 out="$(cd "$SANDBOX/ws-init" \
   && CLAUDE_SETTINGS_PATH="$SETTINGS" PATH="$SANDBOX/bin:$PATH" "$BIN" doctor 2>&1)"
 rc=$?
@@ -202,7 +210,7 @@ mkdir -p "$SANDBOX/ws-a/child" "$SANDBOX/ws-b/child"
 make_ws "$SANDBOX/ws-a" collide child=child
 make_ws "$SANDBOX/ws-b" collide child=child
 
-# Pre-seed state as if ws-a had opened (real open execs zellij and would block).
+# Pre-seed state as if ws-a had opened (real open execs tmux and would block).
 STATE_COLLIDE="$XDG_STATE_HOME/cc-cockpit/collide"
 mkdir -p "$STATE_COLLIDE"
 echo "$(realpath "$SANDBOX/ws-a")" > "$STATE_COLLIDE/workspace_root"
@@ -220,7 +228,6 @@ mkdir -p "$SANDBOX/ws-spawn/good" "$SANDBOX/ws-spawn/notgit" "$SANDBOX/outside-w
 (cd "$SANDBOX/ws-spawn/good" && git init -q)
 make_ws "$SANDBOX/ws-spawn" spawntest good=good notgit=notgit escape=../outside-ws
 
-export ZELLIJ=fake
 export COCKPIT_STATE_HOME="$SANDBOX/spawn-state"
 export CC_COCKPIT_WORKSPACE_ROOT="$SANDBOX/ws-spawn"
 export COCKPIT_WORKSPACE_NAME=spawntest
@@ -233,26 +240,27 @@ echo "$out" | grep -q 'not a git repo' && pass 'non-git dir rejected' || fail "n
 
 FAKE_BIN="$SANDBOX/fake-bin"
 mkdir -p "$FAKE_BIN"
-cat > "$FAKE_BIN/zellij" <<EOF
+cat > "$FAKE_BIN/tmux" <<EOF
 #!/bin/bash
-printf '%s\n' "\$@" > "$SANDBOX/zellij-spawn.args"
+printf '%s\n' "\$@" > "$SANDBOX/tmux-spawn.args"
+echo "%42"
 EOF
 cat > "$FAKE_BIN/claude" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
-chmod +x "$FAKE_BIN/zellij" "$FAKE_BIN/claude"
+chmod +x "$FAKE_BIN/tmux" "$FAKE_BIN/claude"
 OLD_PATH="$PATH"
 export PATH="$FAKE_BIN:$PATH"
 out="$("$BIN" spawn --repo good --task "layout test" 2>&1)"
 rc=$?
 export PATH="$OLD_PATH"
 if [ "$rc" -eq 0 ] \
-   && grep -qx -- 'new-pane' "$SANDBOX/zellij-spawn.args" \
-   && grep -qx -- '--cwd' "$SANDBOX/zellij-spawn.args"; then
-  pass 'spawn launches zellij action new-pane'
+   && grep -qx -- 'new-window' "$SANDBOX/tmux-spawn.args" \
+   && grep -qx -- '-c' "$SANDBOX/tmux-spawn.args"; then
+  pass 'spawn launches tmux new-window'
 else
-  fail "spawn failed: rc=$rc out='$out' args='$(cat "$SANDBOX/zellij-spawn.args" 2>/dev/null)'"
+  fail "spawn failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
 fi
 
 OLD_PATH="$PATH"
@@ -261,11 +269,11 @@ out="$("$BIN" start good shorthand task 2>&1)"
 rc=$?
 export PATH="$OLD_PATH"
 if [ "$rc" -eq 0 ] \
-   && grep -qx -- 'good: shorthand task' "$SANDBOX/zellij-spawn.args" \
-   && grep -qx -- 'COCKPIT_TASK_NAME=shorthand task' "$SANDBOX/zellij-spawn.args"; then
+   && grep -qx -- 'good: shorthand task' "$SANDBOX/tmux-spawn.args" \
+   && grep -qx -- 'COCKPIT_TASK_NAME=shorthand task' "$SANDBOX/tmux-spawn.args"; then
   pass 'start accepts repo plus unquoted task words'
 else
-  fail "start shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/zellij-spawn.args" 2>/dev/null)'"
+  fail "start shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
 fi
 
 OLD_PATH="$PATH"
@@ -274,14 +282,14 @@ out="$("$BIN" spawn good positional task 2>&1)"
 rc=$?
 export PATH="$OLD_PATH"
 if [ "$rc" -eq 0 ] \
-   && grep -qx -- 'good: positional task' "$SANDBOX/zellij-spawn.args" \
-   && grep -qx -- 'COCKPIT_TASK_NAME=positional task' "$SANDBOX/zellij-spawn.args"; then
+   && grep -qx -- 'good: positional task' "$SANDBOX/tmux-spawn.args" \
+   && grep -qx -- 'COCKPIT_TASK_NAME=positional task' "$SANDBOX/tmux-spawn.args"; then
   pass 'spawn accepts shorthand repo plus task words'
 else
-  fail "spawn shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/zellij-spawn.args" 2>/dev/null)'"
+  fail "spawn shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
 fi
 
-unset ZELLIJ COCKPIT_STATE_HOME CC_COCKPIT_WORKSPACE_ROOT COCKPIT_WORKSPACE_NAME
+unset COCKPIT_STATE_HOME CC_COCKPIT_WORKSPACE_ROOT COCKPIT_WORKSPACE_NAME
 
 # =============================================================
 echo '[7] spawn rejects flags without values cleanly'
