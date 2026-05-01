@@ -1,14 +1,15 @@
-# Runtime state (lives under $XDG_STATE_HOME, not here — belt & suspenders)
-state/
-events.jsonl
-events.snapshot.jsonl
-events.lock
-seq.counter
-current.json
-current.json.tmp
-frame.txt
-last_bell_seq
-workspace_root
+# Runtime state (lives under $XDG_STATE_HOME, not here — belt & suspenders).
+# Anchored to repo root so `internal/state/` and similar source dirs aren't ignored.
+/state/
+/events.jsonl
+/events.snapshot.jsonl
+/events.lock
+/seq.counter
+/current.json
+/current.json.tmp
+/frame.txt
+/last_bell_seq
+/workspace_root
 
 # M0 spike — never commit raw Claude Code payloads
 raw-payloads/
