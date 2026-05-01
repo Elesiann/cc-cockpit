@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/elesiann/cc-cockpit/internal/dashboard"
 	"github.com/elesiann/cc-cockpit/internal/hook"
 	"github.com/elesiann/cc-cockpit/internal/state"
 	"github.com/elesiann/cc-cockpit/internal/workspace"
@@ -41,6 +42,8 @@ func main() {
 		os.Exit(runMarkEnded(args))
 	case "hook":
 		os.Exit(runHook(args))
+	case "dashboard":
+		os.Exit(runDashboard(args))
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -59,6 +62,7 @@ Available subcommands (during the bash → Go migration):
   doctor              check install + workspace health
   mark-ended          dismiss stale sessions (synthetic SessionEnd)
   hook <Event>        internal: ingest a Claude Code hook payload
+  dashboard           render the dashboard pane (loop until SIGTERM)
   help                show this message
 
 Other subcommands (open, start) are still served by the bash binary at
@@ -447,5 +451,25 @@ func runHook(args []string) int {
 		return 0
 	}
 	_ = state.Append(stateHome, ev)
+	return 0
+}
+
+// ---------- dashboard ----------
+
+func runDashboard(args []string) int {
+	if len(args) > 0 {
+		die("dashboard", "unexpected arguments: %v", args)
+	}
+	stateHome := os.Getenv("COCKPIT_STATE_HOME")
+	if stateHome == "" {
+		die("dashboard", "COCKPIT_STATE_HOME not set (run inside 'cc-cockpit open')")
+	}
+	workspaceName := os.Getenv("COCKPIT_WORKSPACE_NAME")
+	if workspaceName == "" {
+		workspaceName = "?"
+	}
+	if err := dashboard.Run(stateHome, workspaceName); err != nil {
+		die("dashboard", err.Error())
+	}
 	return 0
 }
