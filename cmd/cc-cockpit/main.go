@@ -9,12 +9,14 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/elesiann/cc-cockpit/internal/hook"
 	"github.com/elesiann/cc-cockpit/internal/state"
 	"github.com/elesiann/cc-cockpit/internal/workspace"
 )
@@ -37,6 +39,8 @@ func main() {
 		os.Exit(runDoctor(args))
 	case "mark-ended":
 		os.Exit(runMarkEnded(args))
+	case "hook":
+		os.Exit(runHook(args))
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -54,10 +58,11 @@ Available subcommands (during the bash → Go migration):
   init                create .cc-cockpit/workspace.json
   doctor              check install + workspace health
   mark-ended          dismiss stale sessions (synthetic SessionEnd)
+  hook <Event>        internal: ingest a Claude Code hook payload
   help                show this message
 
-Other subcommands (open, start, hook) are still served by the bash binary
-at .cc-cockpit/bin/cc-cockpit.`)
+Other subcommands (open, start) are still served by the bash binary at
+.cc-cockpit/bin/cc-cockpit.`)
 }
 
 func die(prefix, format string, args ...any) {
@@ -390,5 +395,57 @@ func runMarkEnded(args []string) int {
 		fmt.Printf("  dismissed: %s\n", sid)
 	}
 	fmt.Printf("mark-ended: %d session(s) dismissed (any later event from a live session will un-dismiss).\n", len(targets))
+	return 0
+}
+
+// ---------- hook ----------
+
+// runHook is invoked by Claude Code's hook system many times per session.
+// It MUST be silent on every error path (any output lands in the Claude pane
+// as noise). Panics are recovered; missing env, malformed payload, append
+// failures all return 0 silently.
+func runHook(args []string) int {
+	defer func() { _ = recover() }()
+
+	if len(args) == 0 {
+		return 0
+	}
+	event := args[0]
+
+	if os.Getenv("COCKPIT_SESSION_ACTIVE") != "1" {
+		return 0
+	}
+	stateHome := os.Getenv("COCKPIT_STATE_HOME")
+	if stateHome == "" {
+		return 0
+	}
+
+	raw, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return 0
+	}
+	var payload map[string]any
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &payload)
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	sid, _ := payload["session_id"].(string)
+	if sid == "" {
+		return 0
+	}
+
+	env := hook.Env{
+		PrimaryRepo:          os.Getenv("COCKPIT_PRIMARY_REPO"),
+		DeclaredRelatedRepos: os.Getenv("COCKPIT_DECLARED_RELATED_REPOS"),
+		TaskName:             os.Getenv("COCKPIT_TASK_NAME"),
+		ZellijPaneID:         os.Getenv("ZELLIJ_PANE_ID"),
+	}
+	ev := hook.Build(event, sid, payload, env)
+	if ev == nil {
+		return 0
+	}
+	_ = state.Append(stateHome, ev)
 	return 0
 }
