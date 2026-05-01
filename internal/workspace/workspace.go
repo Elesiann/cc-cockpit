@@ -136,7 +136,7 @@ func (ws *Workspace) AddRepo(root, label, path string) error {
 	if _, ok := ws.Repos[label]; ok {
 		return fmt.Errorf("duplicate repo label %q; pass explicit labels like api=packages/api", label)
 	}
-	rel, err := resolveRepo(root, path)
+	rel, _, err := resolveRepo(root, path)
 	if err != nil {
 		return fmt.Errorf("repo %q: %w", label, err)
 	}
@@ -150,39 +150,56 @@ func (ws *Workspace) AddRepo(root, label, path string) error {
 // CheckRepo validates a repo entry already stored in workspace.json.
 // Same checks as AddRepo without the duplicate-label test.
 func CheckRepo(root, rel string) error {
-	_, err := resolveRepo(root, rel)
+	_, _, err := resolveRepo(root, rel)
 	return err
 }
 
-// resolveRepo canonicalizes path against root, asserts containment, asserts
-// the path is an existing directory, and asserts it's a git repo. Returns
-// the path relative to the canonical root.
-func resolveRepo(root, path string) (string, error) {
+// Resolve looks up label in ws.Repos, validates the entry against root, and
+// returns the absolute canonical path. Use for spawn-time --cwd args.
+func (ws *Workspace) Resolve(root, label string) (string, error) {
+	rel, ok := ws.Repos[label]
+	if !ok {
+		keys := make([]string, 0, len(ws.Repos))
+		for k := range ws.Repos {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		return "", fmt.Errorf("unknown repo %q. Valid: %s", label, strings.Join(keys, ", "))
+	}
+	_, abs, err := resolveRepo(root, rel)
+	if err != nil {
+		return "", fmt.Errorf("repo %q: %w", label, err)
+	}
+	return abs, nil
+}
+
+// resolveRepo canonicalizes path against root, asserts containment + dir +
+// git-repo. Returns (relPathFromRoot, absResolvedPath, error).
+func resolveRepo(root, path string) (relPath, absPath string, err error) {
 	rootReal, err := filepath.EvalSymlinks(root)
 	if err != nil {
-		return "", fmt.Errorf("cannot canonicalize workspace root: %w", err)
+		return "", "", fmt.Errorf("cannot canonicalize workspace root: %w", err)
 	}
-	var abs string
 	if filepath.IsAbs(path) {
-		abs = filepath.Clean(path)
+		absPath = filepath.Clean(path)
 	} else {
-		abs = filepath.Clean(filepath.Join(root, path))
+		absPath = filepath.Clean(filepath.Join(root, path))
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = real
+	if real, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = real
 	}
-	rel, err := filepath.Rel(rootReal, abs)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("resolves outside workspace root: %s", path)
+	relPath, err = filepath.Rel(rootReal, absPath)
+	if err != nil || relPath == "." || strings.HasPrefix(relPath, "..") {
+		return "", "", fmt.Errorf("resolves outside workspace root: %s", path)
 	}
-	info, err := os.Stat(abs)
+	info, err := os.Stat(absPath)
 	if err != nil || !info.IsDir() {
-		return "", fmt.Errorf("dir does not exist: %s", path)
+		return "", "", fmt.Errorf("dir does not exist: %s", path)
 	}
-	if err := exec.Command("git", "-C", abs, "rev-parse", "--git-dir").Run(); err != nil {
-		return "", fmt.Errorf("not a git repo: %s", path)
+	if err := exec.Command("git", "-C", absPath, "rev-parse", "--git-dir").Run(); err != nil {
+		return "", "", fmt.Errorf("not a git repo: %s", path)
 	}
-	return rel, nil
+	return relPath, absPath, nil
 }
 
 // DiscoverRepos returns absolute paths of child git repos found at depths

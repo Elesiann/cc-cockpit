@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,10 +15,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/elesiann/cc-cockpit/internal/dashboard"
 	"github.com/elesiann/cc-cockpit/internal/hook"
+	"github.com/elesiann/cc-cockpit/internal/install"
 	"github.com/elesiann/cc-cockpit/internal/state"
 	"github.com/elesiann/cc-cockpit/internal/workspace"
 )
@@ -44,6 +49,16 @@ func main() {
 		os.Exit(runHook(args))
 	case "dashboard":
 		os.Exit(runDashboard(args))
+	case "install", "setup":
+		os.Exit(runInstall(args))
+	case "open":
+		os.Exit(runOpen(args))
+	case "start":
+		os.Setenv("CC_COCKPIT_CMD_NAME", "start")
+		os.Exit(runSpawn(args))
+	case "spawn":
+		os.Setenv("CC_COCKPIT_CMD_NAME", "spawn")
+		os.Exit(runSpawn(args))
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -58,15 +73,17 @@ func usage() {
 
 Available subcommands (during the bash → Go migration):
   --version           print version
+  install             install the binary on PATH and Claude Code hooks
   init                create .cc-cockpit/workspace.json
   doctor              check install + workspace health
+  open                open the cockpit (launches Zellij with dashboard + control)
+  start <repo> ...    open a Claude pane in repos[<repo>] running the given task
+  spawn <repo> ...    alias for start
   mark-ended          dismiss stale sessions (synthetic SessionEnd)
   hook <Event>        internal: ingest a Claude Code hook payload
-  dashboard           render the dashboard pane (loop until SIGTERM)
-  help                show this message
-
-Other subcommands (open, start) are still served by the bash binary at
-.cc-cockpit/bin/cc-cockpit.`)
+  dashboard           internal: render the dashboard pane (loop until SIGTERM)
+  --version           print version
+  help                show this message`)
 }
 
 func die(prefix, format string, args ...any) {
@@ -472,4 +489,393 @@ func runDashboard(args []string) int {
 		die("dashboard", err.Error())
 	}
 	return 0
+}
+
+// ---------- install ----------
+
+func runInstall(args []string) int {
+	binDir := envOrDefault("CC_COCKPIT_BIN_DIR", filepath.Join(homeDir(), ".local", "bin"))
+	settings := envOrDefault("CLAUDE_SETTINGS_PATH", filepath.Join(homeDir(), ".claude", "settings.json"))
+	doBin, doHooks := true, true
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--bin-dir":
+			if i+1 >= len(args) {
+				die("install", "--bin-dir requires a value")
+			}
+			binDir = args[i+1]
+			i++
+		case "--settings":
+			if i+1 >= len(args) {
+				die("install", "--settings requires a value")
+			}
+			settings = args[i+1]
+			i++
+		case "--no-bin":
+			doBin = false
+		case "--no-hooks":
+			doHooks = false
+		default:
+			die("install", "unknown flag %q", args[i])
+		}
+	}
+
+	selfPath, err := os.Executable()
+	if err != nil {
+		die("install", "cannot determine binary path: %v", err)
+	}
+	if real, err := filepath.EvalSymlinks(selfPath); err == nil {
+		selfPath = real
+	}
+
+	binLink := filepath.Join(binDir, "cc-cockpit")
+	if doBin {
+		if err := install.InstallBin(binDir, selfPath); err != nil {
+			die("install", "%v", err)
+		}
+		fmt.Printf("install: installed %s -> %s\n", binLink, selfPath)
+	}
+
+	if doHooks {
+		if err := install.InstallHooks(settings, binLink); err != nil {
+			die("install", "%v", err)
+		}
+		fmt.Printf("install: installed Claude Code hooks in %s\n", settings)
+	}
+
+	if _, err := exec.LookPath("zellij"); err != nil {
+		fmt.Fprintln(os.Stderr, "install: warning: zellij not found on PATH")
+	}
+	if _, err := exec.LookPath("claude"); err != nil {
+		fmt.Fprintln(os.Stderr, "install: warning: claude not found on PATH")
+	}
+	fmt.Println("install: done")
+	return 0
+}
+
+// ---------- open ----------
+
+// liveLockFd holds the cockpit.live.lock fd open for the Go process's
+// lifetime. The flock is advisory + fd-based, so it releases when the fd
+// closes — which we want to happen only when zellij exits.
+var liveLockFd *os.File
+
+const zellijLayout = `layout {
+    pane split_direction="vertical" {
+        pane size=60 borderless=false {
+            name "cc-cockpit dashboard"
+            command "cc-cockpit"
+            args "dashboard"
+        }
+        pane {
+            name "control"
+            command "bash"
+        }
+    }
+
+    swap_tiled_layout name="cc-cockpit" {
+        tab exact_panes=2 {
+            pane split_direction="vertical" {
+                pane size=60 borderless=false {
+                    name "cc-cockpit dashboard"
+                    command "cc-cockpit"
+                    args "dashboard"
+                }
+                pane {
+                    name "control"
+                    command "bash"
+                }
+            }
+        }
+
+        tab min_panes=3 {
+            pane split_direction="horizontal" {
+                pane split_direction="vertical" size="50%" {
+                    pane size=60 borderless=false {
+                        name "cc-cockpit dashboard"
+                        command "cc-cockpit"
+                        args "dashboard"
+                    }
+                    pane {
+                        name "control"
+                        command "bash"
+                    }
+                }
+                pane split_direction="vertical" {
+                    children
+                }
+            }
+        }
+    }
+}
+`
+
+func runOpen(args []string) int {
+	if len(args) > 0 {
+		die("open", "unexpected arguments: %v", args)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		die("open", "cannot determine current directory: %v", err)
+	}
+	root := workspace.FindRoot(cwd)
+	if root == "" {
+		die("open", "Not in a cc-cockpit workspace. Run 'cc-cockpit init' from the workspace parent first.")
+	}
+	canonical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		die("open", "cannot canonicalize workspace path: %v", err)
+	}
+	ws, err := workspace.Load(root)
+	if err != nil {
+		die("open", "%v", err)
+	}
+	if !workspace.ValidSlug(ws.Name) {
+		die("open", "invalid workspace name %q — must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ (no slashes, no '..')", ws.Name)
+	}
+
+	stateHome := filepath.Join(xdgStateHome(), "cc-cockpit", ws.Name)
+	if err := os.MkdirAll(stateHome, 0o755); err != nil {
+		die("open", "cannot create state dir %q: %v", stateHome, err)
+	}
+
+	if err := bindWorkspace(stateHome, canonical, ws.Name); err != nil {
+		die("open", "%v", err)
+	}
+
+	if _, err := exec.LookPath("zellij"); err != nil {
+		die("open", "zellij not found on PATH")
+	}
+
+	if err := acquireLiveLock(stateHome, ws.Name); err != nil {
+		die("open", "%v", err)
+	}
+
+	layoutPath := filepath.Join(stateHome, "layout.kdl")
+	if err := os.WriteFile(layoutPath, []byte(zellijLayout), 0o644); err != nil {
+		die("open", "cannot write layout: %v", err)
+	}
+
+	fmt.Printf("cc-cockpit: workspace=%s  state=%s\n", ws.Name, stateHome)
+
+	cmd := exec.Command("zellij", "--layout", layoutPath)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(),
+		"COCKPIT_STATE_HOME="+stateHome,
+		"COCKPIT_WORKSPACE_NAME="+ws.Name,
+		"CC_COCKPIT_WORKSPACE_ROOT="+canonical,
+	)
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		die("open", "zellij: %v", err)
+	}
+	return 0
+}
+
+func bindWorkspace(stateHome, canonical, name string) error {
+	initLock := filepath.Join(stateHome, "init.lock")
+	fd, err := os.OpenFile(initLock, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("init.lock: %w", err)
+	}
+	defer fd.Close()
+	if err := unix.Flock(int(fd.Fd()), unix.LOCK_EX); err != nil {
+		return err
+	}
+	defer unix.Flock(int(fd.Fd()), unix.LOCK_UN)
+
+	wrPath := filepath.Join(stateHome, "workspace_root")
+	existing, err := os.ReadFile(wrPath)
+	switch {
+	case err == nil:
+		existingStr := strings.TrimSpace(string(existing))
+		if existingStr != canonical {
+			return fmt.Errorf("workspace name %q is already bound to %q (current is %q).\n    Rename the workspace (change 'name' in .cc-cockpit/workspace.json) or remove the stale\n    state dir: rm -rf %q",
+				name, existingStr, canonical, stateHome)
+		}
+	case errors.Is(err, os.ErrNotExist):
+		if err := os.WriteFile(wrPath, []byte(canonical+"\n"), 0o644); err != nil {
+			return err
+		}
+	default:
+		return err
+	}
+
+	logPath := filepath.Join(stateHome, "events.jsonl")
+	if _, err := os.Stat(logPath); errors.Is(err, os.ErrNotExist) {
+		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+			_ = f.Close()
+		}
+	}
+	return nil
+}
+
+func acquireLiveLock(stateHome, name string) error {
+	pidFile := filepath.Join(stateHome, "cockpit.live.pid")
+	lockFile := filepath.Join(stateHome, "cockpit.live.lock")
+
+	var existingHolder string
+	if data, err := os.ReadFile(pidFile); err == nil && len(data) > 0 {
+		existingHolder = " (pid " + strings.TrimSpace(string(data)) + ")"
+	}
+
+	fd, err := os.OpenFile(lockFile, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("cannot open lock file: %w", err)
+	}
+	if err := unix.Flock(int(fd.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		_ = fd.Close()
+		return fmt.Errorf("a cockpit is already running for workspace %q%s.\n    Lockfile: %s\n    If you believe the holder is gone (stale lock): rm -f %q %q",
+			name, existingHolder, lockFile, lockFile, pidFile)
+	}
+	liveLockFd = fd
+
+	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644)
+	return nil
+}
+
+// ---------- spawn / start ----------
+
+func runSpawn(args []string) int {
+	cmdName := envOrDefault("CC_COCKPIT_CMD_NAME", "spawn")
+
+	var repo, task, related string
+	var positional []string
+	sep := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if sep {
+			positional = append(positional, a)
+			continue
+		}
+		switch a {
+		case "--repo", "--task", "--related":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				die(cmdName, "%s requires a value", a)
+			}
+			v := args[i+1]
+			i++
+			switch a {
+			case "--repo":
+				repo = v
+			case "--task":
+				task = v
+			case "--related":
+				related = v
+			}
+		case "--":
+			sep = true
+		default:
+			if strings.HasPrefix(a, "-") {
+				die(cmdName, "unknown flag %q", a)
+			}
+			positional = append(positional, a)
+		}
+	}
+
+	if len(positional) > 0 {
+		taskStart := 0
+		if repo == "" {
+			repo = positional[0]
+			taskStart = 1
+		}
+		if taskStart < len(positional) {
+			if task != "" {
+				die(cmdName, "unexpected positional task %q", positional[taskStart])
+			}
+			task = strings.Join(positional[taskStart:], " ")
+		}
+	}
+
+	if repo == "" {
+		die(cmdName, "repo required (usage: cc-cockpit %s <repo> <task...>)", cmdName)
+	}
+	if task == "" {
+		die(cmdName, "task required (usage: cc-cockpit %s <repo> <task...>)", cmdName)
+	}
+	if os.Getenv("ZELLIJ") == "" {
+		die(cmdName, "must be run inside a Zellij session (launched by 'cc-cockpit open')")
+	}
+	stateHome := os.Getenv("COCKPIT_STATE_HOME")
+	if stateHome == "" {
+		die(cmdName, "COCKPIT_STATE_HOME not set")
+	}
+	wsRoot := os.Getenv("CC_COCKPIT_WORKSPACE_ROOT")
+	if wsRoot == "" {
+		die(cmdName, "CC_COCKPIT_WORKSPACE_ROOT not set")
+	}
+	workspaceName := envOrDefault("COCKPIT_WORKSPACE_NAME", "?")
+
+	ws, err := workspace.Load(wsRoot)
+	if err != nil {
+		die(cmdName, "workspace.json: %v", err)
+	}
+	if ws.Repos == nil {
+		die(cmdName, "workspace.json .repos must be an object { \"<label>\": \"<path>\", ... }")
+	}
+	abs, err := ws.Resolve(wsRoot, repo)
+	if err != nil {
+		die(cmdName, "%v", err)
+	}
+
+	if _, err := exec.LookPath("claude"); err != nil {
+		die(cmdName, "'claude' not found on PATH")
+	}
+
+	paneName := repo + ": " + task
+	if len(paneName) > 60 {
+		paneName = paneName[:60]
+	}
+
+	cmd := exec.Command("zellij", "action", "new-pane",
+		"--cwd", abs,
+		"--name", paneName,
+		"--",
+		"env",
+		"COCKPIT_SESSION_ACTIVE=1",
+		"COCKPIT_STATE_HOME="+stateHome,
+		"COCKPIT_WORKSPACE_NAME="+workspaceName,
+		"COCKPIT_PRIMARY_REPO="+repo,
+		"COCKPIT_DECLARED_RELATED_REPOS="+related,
+		"COCKPIT_TASK_NAME="+task,
+		"claude",
+	)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return exitErr.ExitCode()
+		}
+		die(cmdName, "zellij: %v", err)
+	}
+	return 0
+}
+
+// ---------- helpers ----------
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func homeDir() string {
+	h, _ := os.UserHomeDir()
+	return h
+}
+
+func xdgStateHome() string {
+	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
+		return x
+	}
+	return filepath.Join(homeDir(), ".local", "state")
 }
