@@ -18,10 +18,7 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
-// Run drives the dashboard loop until SIGINT/SIGTERM/SIGHUP/SIGQUIT. The
-// terminal enters the alt-screen on entry and is restored on any exit
-// (including panics — wrapped in defer) so a crashed dashboard never leaves
-// the terminal stuck.
+// Run drives the dashboard loop until SIGINT/SIGTERM/SIGHUP/SIGQUIT.
 func Run(stateHome, workspaceName string) error {
 	if err := os.MkdirAll(stateHome, 0o755); err != nil {
 		return err
@@ -31,14 +28,12 @@ func Run(stateHome, workspaceName string) error {
 	bellPath := filepath.Join(stateHome, "last_bell_seq")
 	currentPath := filepath.Join(stateHome, "current.json")
 
-	// Touch the log so the first snapshot doesn't fail if no hooks have fired yet.
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
 		_ = f.Close()
 	}
 
 	lastBellSeq := loadBellSeq(bellPath, stateHome)
 
-	// alt-screen + cursor hide; restore on any exit.
 	fmt.Print("\033[?1049h\033[?25l")
 	defer fmt.Print("\033[?25h\033[?1049l")
 
@@ -47,6 +42,7 @@ func Run(stateHome, workspaceName string) error {
 	defer signal.Stop(sigCh)
 
 	var prevFrame string
+	var prevCurrentJSON []byte
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -58,8 +54,9 @@ func Run(stateHome, workspaceName string) error {
 			stageErr = "snapshot: " + err.Error()
 		} else {
 			st = state.Reduce(bytes.NewReader(data))
-			if buf, mErr := marshalCurrent(st); mErr == nil {
+			if buf, mErr := marshalCurrent(st); mErr == nil && !bytes.Equal(buf, prevCurrentJSON) {
 				writeAtomic(currentPath, buf)
+				prevCurrentJSON = buf
 			}
 		}
 
@@ -98,10 +95,9 @@ func Run(stateHome, workspaceName string) error {
 	}
 }
 
-// snapshot reads events.jsonl into memory under a shared flock on events.lock.
-// Concurrent appends (which take an exclusive lock) will block briefly until
-// the read finishes; this is the same shared-vs-exclusive dance the bash
-// dashboard does.
+// snapshot reads events.jsonl into memory under a shared flock on
+// events.lock, so concurrent writers (which hold an exclusive lock) get
+// serialized correctly.
 func snapshot(stateHome string) ([]byte, error) {
 	lockPath := filepath.Join(stateHome, "events.lock")
 	logPath := filepath.Join(stateHome, "events.jsonl")
@@ -117,16 +113,14 @@ func snapshot(stateHome string) ([]byte, error) {
 	return os.ReadFile(logPath)
 }
 
-// loadBellSeq reads the persisted bell-seq checkpoint; on first boot, it
-// initializes to the current log's max seq so historical attention events
-// don't replay.
+// loadBellSeq seeds from disk on subsequent boots; on first boot, primes
+// from the current max log seq so historical events don't replay.
 func loadBellSeq(bellPath, stateHome string) int64 {
 	if raw, err := os.ReadFile(bellPath); err == nil {
 		if n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil {
 			return n
 		}
 	}
-	// First boot: seed from current max log seq.
 	data, err := snapshot(stateHome)
 	if err != nil {
 		return 0
@@ -141,9 +135,6 @@ type bellInfo struct {
 	MaxSeq       int64
 }
 
-// computeBell scans the snapshot for new Notification/PermissionRequest
-// events with seq > lastBellSeq, and tracks the new max seq for checkpointing.
-// Tolerates malformed lines.
 func computeBell(data []byte, lastBellSeq int64) bellInfo {
 	info := bellInfo{MaxSeq: lastBellSeq}
 	scanner := bufio.NewScanner(bytes.NewReader(data))
@@ -163,7 +154,7 @@ func computeBell(data []byte, lastBellSeq int64) bellInfo {
 		if ev.Seq > info.MaxSeq {
 			info.MaxSeq = ev.Seq
 		}
-		if ev.Seq > lastBellSeq && (ev.EventType == "Notification" || ev.EventType == "PermissionRequest") {
+		if ev.Seq > lastBellSeq && (ev.EventType == state.EventNotification || ev.EventType == state.EventPermissionRequest) {
 			info.NewAttention++
 		}
 	}

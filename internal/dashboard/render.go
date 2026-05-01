@@ -1,6 +1,3 @@
-// Package dashboard implements the cc-cockpit dashboard pane: a polling
-// loop that snapshots events.jsonl, reduces it, renders a frame, and rings
-// the terminal bell on new attention events.
 package dashboard
 
 import (
@@ -14,18 +11,13 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
-// Render produces the dashboard frame for st as of now. Pure function so
-// tests can pin behavior without driving a real terminal.
-//
-// Output mirrors render.sh: header line with status counts, an active-session
-// table aligned by tabwriter, and an ended-sessions footer (last 3).
+// Render produces the dashboard frame for st as of now.
 func Render(st state.State, workspaceName string, now time.Time) string {
 	var b strings.Builder
 	b.WriteString(renderHeader(st, workspaceName))
 	b.WriteString("\n\n")
 	b.WriteString(renderActiveTable(st, now))
-	footer := renderEndedFooter(st, now)
-	if footer != "" {
+	if footer := renderEndedFooter(st, now); footer != "" {
 		b.WriteString("\n\n")
 		b.WriteString(footer)
 	}
@@ -36,16 +28,16 @@ func renderHeader(st state.State, ws string) string {
 	var active, running, waiting, idle, ended int
 	for _, s := range st.Sessions {
 		switch s.Status {
-		case "running":
+		case state.StatusRunning:
 			running++
 			active++
-		case "waiting_input":
+		case state.StatusWaitingInput:
 			waiting++
 			active++
-		case "idle":
+		case state.StatusIdle:
 			idle++
 			active++
-		case "ended":
+		case state.StatusEnded:
 			ended++
 		}
 	}
@@ -54,8 +46,7 @@ func renderHeader(st state.State, ws string) string {
 	if st.DroppedEvents > 0 {
 		h += fmt.Sprintf("  ⚠ dropped=%d", st.DroppedEvents)
 	}
-	h += " ───"
-	return h
+	return h + " ───"
 }
 
 func renderActiveTable(st state.State, now time.Time) string {
@@ -65,7 +56,7 @@ func renderActiveTable(st state.State, now time.Time) string {
 	}
 	var active []row
 	for sid, s := range st.Sessions {
-		if s.Status != "ended" {
+		if s.Status != state.StatusEnded {
 			active = append(active, row{sid, s})
 		}
 	}
@@ -81,11 +72,15 @@ func renderActiveTable(st state.State, now time.Time) string {
 	fmt.Fprintln(tw, "STATUS\tSID\tREPO\tTASK\tACT")
 	for _, r := range active {
 		s := r.sess
+		task := jsonRawString(s.TaskName, "—")
+		if len(task) > 40 {
+			task = task[:40]
+		}
 		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n",
 			glyph(s.Status), s.Status,
 			shortSID(r.sid),
 			jsonRawString(s.PrimaryRepo, "—"),
-			truncate(jsonRawString(s.TaskName, "—"), 40),
+			task,
 			activitySince(s.LastActivity, now, false),
 		)
 	}
@@ -101,7 +96,7 @@ func renderEndedFooter(st state.State, now time.Time) string {
 	}
 	var ended []row
 	for sid, s := range st.Sessions {
-		if s.Status != "ended" {
+		if s.Status != state.StatusEnded {
 			continue
 		}
 		key := jsonRawString(s.EndedAt, "")
@@ -137,28 +132,28 @@ func renderEndedFooter(st state.State, now time.Time) string {
 
 func glyph(status string) string {
 	switch status {
-	case "running":
+	case state.StatusRunning:
 		return "▶"
-	case "waiting_input":
+	case state.StatusWaitingInput:
 		return "●"
-	case "idle":
+	case state.StatusIdle:
 		return "◯"
-	case "ended":
+	case state.StatusEnded:
 		return "◼"
 	}
 	return "?"
 }
 
 func shortSID(sid string) string {
-	if len(sid) <= 8 {
-		return sid
+	if len(sid) > 8 {
+		return sid[:8]
 	}
-	return sid[:8]
+	return sid
 }
 
-// jsonRawString unwraps a json.RawMessage that's either a string or null
-// (matches how the reducer stores per-session fields). Returns fallback
-// when the value is null, missing, or non-string.
+// jsonRawString unwraps a json.RawMessage of either string or null. The
+// reducer stores per-session fields this way to faithfully copy whatever
+// the payload had.
 func jsonRawString(raw json.RawMessage, fallback string) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return fallback
@@ -170,15 +165,6 @@ func jsonRawString(raw json.RawMessage, fallback string) string {
 	return fallback
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
-}
-
-// activitySince formats time-since-iso as Ns/Nm/Nh; with suffix=true,
-// appends " ago" (used in the ended footer).
 func activitySince(iso string, now time.Time, suffix bool) string {
 	if iso == "" {
 		return "—"

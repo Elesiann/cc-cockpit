@@ -1,8 +1,4 @@
-// cc-cockpit — Go port (work in progress).
-//
-// During Phase 1 of the bash → Go migration, subcommands are ported one at a
-// time. Anything not yet ported here is still served by the bash binary at
-// .cc-cockpit/bin/cc-cockpit.
+// cc-cockpit — workspace supervisor for parallel Claude Code sessions.
 package main
 
 import (
@@ -62,8 +58,7 @@ func main() {
 	case "help", "--help", "-h":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "cc-cockpit: subcommand %q not yet implemented in Go port\n", cmd)
-		fmt.Fprintln(os.Stderr, "Use the bash binary at .cc-cockpit/bin/cc-cockpit for full functionality.")
+		fmt.Fprintf(os.Stderr, "cc-cockpit: unknown subcommand %q (try --help)\n", cmd)
 		os.Exit(2)
 	}
 }
@@ -71,8 +66,7 @@ func main() {
 func usage() {
 	fmt.Println(`cc-cockpit ` + Version + `
 
-Available subcommands (during the bash → Go migration):
-  --version           print version
+Subcommands:
   install             install the binary on PATH and Claude Code hooks
   init                create .cc-cockpit/workspace.json
   doctor              check install + workspace health
@@ -159,29 +153,20 @@ func runInit(args []string) int {
 		die("init", "cannot write workspace.json: %v", err)
 	}
 
-	fmt.Printf("workspace: %s\n", wsName)
-	fmt.Printf("config: %s\n", wsPath)
-	fmt.Println()
-	fmt.Println("repos:")
-	keys := sortedKeys(ws.Repos)
+	keys := make([]string, 0, len(ws.Repos))
+	for k := range ws.Repos {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fmt.Printf("workspace: %s\nconfig: %s\n\nrepos:\n", wsName, wsPath)
 	for _, k := range keys {
 		fmt.Printf("  %-16s %s\n", k, ws.Repos[k])
 	}
-	fmt.Println()
-	fmt.Println("next:")
-	fmt.Println("  cc-cockpit open")
-	fmt.Printf("  cc-cockpit start %s <task>\n", keys[0])
+	fmt.Printf("\nnext:\n  cc-cockpit open\n  cc-cockpit start %s <task>\n", keys[0])
 	return 0
 }
 
 // ---------- doctor ----------
-
-// claudeHookEvents is the canonical list. Keep in sync with install_claude_hooks
-// in the bash binary (and the Go install port when it lands).
-var claudeHookEvents = []string{
-	"SessionStart", "UserPromptSubmit", "PermissionRequest",
-	"Notification", "PostToolUse", "Stop", "SessionEnd",
-}
 
 func runDoctor(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
@@ -198,7 +183,6 @@ func runDoctor(args []string) int {
 		issues++
 	}
 
-	// Tool checks — Go binary has no shell dependencies (no jq, no flock(1)).
 	for _, tool := range []string{"zellij", "claude", "cc-cockpit"} {
 		path, err := exec.LookPath(tool)
 		switch {
@@ -211,28 +195,39 @@ func runDoctor(args []string) int {
 		}
 	}
 
-	// Claude settings.
-	settingsPath := os.Getenv("CLAUDE_SETTINGS_PATH")
-	if settingsPath == "" {
-		home, _ := os.UserHomeDir()
-		settingsPath = filepath.Join(home, ".claude", "settings.json")
-	}
+	settingsPath := envOrDefault("CLAUDE_SETTINGS_PATH", filepath.Join(homeDir(), ".claude", "settings.json"))
 	settingsRaw, err := os.ReadFile(settingsPath)
 	if err != nil {
 		fail("Claude settings not found: %s (run cc-cockpit install)", settingsPath)
 	} else {
-		hooks, err := parseSettingsHooks(settingsRaw)
-		if err != nil {
+		var top struct {
+			Hooks map[string][]any `json:"hooks"`
+		}
+		if err := json.Unmarshal(settingsRaw, &top); err != nil {
 			fail("Claude settings invalid: %v", err)
 		} else {
-			for _, ev := range claudeHookEvents {
-				if hasCockpitHook(hooks[ev], ev) {
+			for _, ev := range install.Events {
+				found := false
+				for _, e := range top.Hooks[ev] {
+					if install.EntryHasCockpitHook(e) {
+						found = true
+						break
+					}
+				}
+				if found {
 					ok("Claude hook installed: %s", ev)
 				} else {
 					fail("Claude hook missing: %s (run cc-cockpit install)", ev)
 				}
 			}
-			if hasNotificationMatcher(hooks["Notification"]) {
+			matcherOK := false
+			for _, e := range top.Hooks[state.EventNotification] {
+				if install.EntryHasMatcher(e, "idle_prompt|permission_prompt") {
+					matcherOK = true
+					break
+				}
+			}
+			if matcherOK {
 				ok("Notification hook matcher is idle_prompt|permission_prompt")
 			} else {
 				fail("Notification hook matcher missing idle_prompt|permission_prompt")
@@ -280,58 +275,6 @@ func runDoctor(args []string) int {
 	return 1
 }
 
-// hookEntry mirrors the shape ~/.claude/settings.json uses under .hooks.<Event>:
-//
-//	[ { "matcher": "...", "hooks": [ { "type": "command", "command": "..." } ] }, ... ]
-type hookEntry struct {
-	Matcher string `json:"matcher,omitempty"`
-	Hooks   []struct {
-		Type    string `json:"type"`
-		Command string `json:"command"`
-	} `json:"hooks"`
-}
-
-func parseSettingsHooks(raw []byte) (map[string][]hookEntry, error) {
-	var top struct {
-		Hooks map[string][]hookEntry `json:"hooks"`
-	}
-	if err := json.Unmarshal(raw, &top); err != nil {
-		return nil, err
-	}
-	if top.Hooks == nil {
-		return map[string][]hookEntry{}, nil
-	}
-	return top.Hooks, nil
-}
-
-// hasCockpitHook returns true if any entry has a hook command containing
-// "cc-cockpit hook <event>" — the same substring check the bash doctor uses.
-func hasCockpitHook(entries []hookEntry, event string) bool {
-	needle := "cc-cockpit hook " + event
-	for _, e := range entries {
-		for _, h := range e.Hooks {
-			if strings.Contains(h.Command, needle) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func hasNotificationMatcher(entries []hookEntry) bool {
-	for _, e := range entries {
-		if e.Matcher != "idle_prompt|permission_prompt" {
-			continue
-		}
-		for _, h := range e.Hooks {
-			if strings.Contains(h.Command, "cc-cockpit hook Notification") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -344,7 +287,8 @@ func sortedKeys[V any](m map[string]V) []string {
 // ---------- mark-ended ----------
 
 func runMarkEnded(args []string) int {
-	// Hand-parse so --yes/-y can appear anywhere (matches bash behavior).
+	// Hand-parse so --yes/-y can appear anywhere (Go's flag pkg stops at the
+	// first positional, which would reject `mark-ended all-non-ended --yes`).
 	var yes bool
 	var posArgs []string
 	for _, a := range args {
@@ -371,8 +315,7 @@ func runMarkEnded(args []string) int {
 		die("mark-ended", "COCKPIT_STATE_HOME not set (run inside 'cc-cockpit open')")
 	}
 
-	logPath := filepath.Join(stateHome, "events.jsonl")
-	f, err := os.Open(logPath)
+	f, err := os.Open(filepath.Join(stateHome, "events.jsonl"))
 	if err != nil {
 		die("mark-ended", "no events.jsonl in %s", stateHome)
 	}
@@ -381,7 +324,7 @@ func runMarkEnded(args []string) int {
 
 	var targets []string
 	for sid, sess := range st.Sessions {
-		if sess.Status == "ended" {
+		if sess.Status == state.StatusEnded {
 			continue
 		}
 		if prefix == "all-non-ended" || strings.HasPrefix(sid, prefix) {
@@ -405,7 +348,7 @@ func runMarkEnded(args []string) int {
 
 	for _, sid := range targets {
 		ev := map[string]any{
-			"event_type": "SessionEnd",
+			"event_type": state.EventSessionEnd,
 			"session_id": sid,
 			"payload":    map[string]any{"synthetic": true, "reason": "operator-dismissed"},
 		}
@@ -414,16 +357,14 @@ func runMarkEnded(args []string) int {
 		}
 		fmt.Printf("  dismissed: %s\n", sid)
 	}
-	fmt.Printf("mark-ended: %d session(s) dismissed (any later event from a live session will un-dismiss).\n", len(targets))
+	fmt.Printf("mark-ended: %d session(s) dismissed (any later event un-dismisses).\n", len(targets))
 	return 0
 }
 
 // ---------- hook ----------
 
-// runHook is invoked by Claude Code's hook system many times per session.
-// It MUST be silent on every error path (any output lands in the Claude pane
-// as noise). Panics are recovered; missing env, malformed payload, append
-// failures all return 0 silently.
+// runHook is invoked by Claude Code many times per session. Output lands in
+// the Claude pane, so every error path — including panics — must be silent.
 func runHook(args []string) int {
 	defer func() { _ = recover() }()
 
@@ -555,9 +496,8 @@ func runInstall(args []string) int {
 
 // ---------- open ----------
 
-// liveLockFd holds the cockpit.live.lock fd open for the Go process's
-// lifetime. The flock is advisory + fd-based, so it releases when the fd
-// closes — which we want to happen only when zellij exits.
+// liveLockFd is intentionally never closed: flock releases when the fd
+// closes, and we want the lock held until zellij exits.
 var liveLockFd *os.File
 
 const zellijLayout = `layout {
@@ -631,10 +571,11 @@ func runOpen(args []string) int {
 		die("open", "%v", err)
 	}
 	if !workspace.ValidSlug(ws.Name) {
-		die("open", "invalid workspace name %q — must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ (no slashes, no '..')", ws.Name)
+		die("open", "invalid workspace name %q (must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$)", ws.Name)
 	}
 
-	stateHome := filepath.Join(xdgStateHome(), "cc-cockpit", ws.Name)
+	stateRoot := envOrDefault("XDG_STATE_HOME", filepath.Join(homeDir(), ".local", "state"))
+	stateHome := filepath.Join(stateRoot, "cc-cockpit", ws.Name)
 	if err := os.MkdirAll(stateHome, 0o755); err != nil {
 		die("open", "cannot create state dir %q: %v", stateHome, err)
 	}
@@ -695,7 +636,7 @@ func bindWorkspace(stateHome, canonical, name string) error {
 	case err == nil:
 		existingStr := strings.TrimSpace(string(existing))
 		if existingStr != canonical {
-			return fmt.Errorf("workspace name %q is already bound to %q (current is %q).\n    Rename the workspace (change 'name' in .cc-cockpit/workspace.json) or remove the stale\n    state dir: rm -rf %q",
+			return fmt.Errorf("workspace %q already bound to %q (current: %q); rename workspace or rm -rf %s",
 				name, existingStr, canonical, stateHome)
 		}
 	case errors.Is(err, os.ErrNotExist):
@@ -707,10 +648,8 @@ func bindWorkspace(stateHome, canonical, name string) error {
 	}
 
 	logPath := filepath.Join(stateHome, "events.jsonl")
-	if _, err := os.Stat(logPath); errors.Is(err, os.ErrNotExist) {
-		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
-			_ = f.Close()
-		}
+	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+		_ = f.Close()
 	}
 	return nil
 }
@@ -730,8 +669,8 @@ func acquireLiveLock(stateHome, name string) error {
 	}
 	if err := unix.Flock(int(fd.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = fd.Close()
-		return fmt.Errorf("a cockpit is already running for workspace %q%s.\n    Lockfile: %s\n    If you believe the holder is gone (stale lock): rm -f %q %q",
-			name, existingHolder, lockFile, lockFile, pidFile)
+		return fmt.Errorf("cockpit already running for %q%s (stale? rm -f %s %s)",
+			name, existingHolder, lockFile, pidFile)
 	}
 	liveLockFd = fd
 
@@ -870,11 +809,4 @@ func envOrDefault(key, fallback string) string {
 func homeDir() string {
 	h, _ := os.UserHomeDir()
 	return h
-}
-
-func xdgStateHome() string {
-	if x := os.Getenv("XDG_STATE_HOME"); x != "" {
-		return x
-	}
-	return filepath.Join(homeDir(), ".local", "state")
 }
