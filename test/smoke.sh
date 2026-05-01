@@ -158,8 +158,9 @@ mkdir -p "$SANDBOX/open-fake-bin"
 cat > "$SANDBOX/open-fake-bin/tmux" <<EOF
 #!/bin/bash
 printf '%s\n' "\$@" >> "$SANDBOX/open-tmux.args"
-case " \$* " in
-  *" has-session "*) exit 1 ;;
+# tmux is invoked as: tmux -L cc-cockpit <subcmd> ...; subcmd is \$3.
+case "\$3" in
+  has-session) exit 1 ;;
 esac
 exit 0
 EOF

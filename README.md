@@ -223,7 +223,7 @@ A Claude session opens in its own tmux window named `<repo>: <task>`. Switch bet
 - `◯ idle` — Last turn ended, no activity, no pending input.
 - `◼ ended` — Session closed (either via `/quit` or dismissed with `mark-ended`).
 
-**End a session:** `/quit` in the Claude window. Dashboard moves it to the `ended` footer. If Claude crashes without firing its own `SessionEnd`, tmux's `pane-died` hook auto-emits a synthetic one and the dashboard updates within a tick — no manual cleanup needed.
+**End a session:** `/quit` in the Claude window. Dashboard moves it to the `ended` footer. If Claude crashes without firing its own `SessionEnd`, tmux's `pane-died` hook auto-emits a synthetic one and the dashboard updates within a tick — no manual cleanup needed. (cc-cockpit installs the hook with `set-hook -g`, so it only affects its own private `-L cc-cockpit` server, never your normal tmux config.)
 
 **Dismiss a stale session** (rare; only useful if both the pane-died hook and the natural SessionEnd are missed):
 ```bash
