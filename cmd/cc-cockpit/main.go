@@ -371,12 +371,7 @@ func runMarkEnded(args []string) int {
 	}
 
 	for _, sid := range targets {
-		ev := map[string]any{
-			"event_type": state.EventSessionEnd,
-			"session_id": sid,
-			"payload":    map[string]any{"synthetic": true, "reason": "operator-dismissed"},
-		}
-		if err := state.Append(stateHome, ev); err != nil {
+		if err := appendSyntheticEnd(stateHome, sid, "operator-dismissed"); err != nil {
 			die("mark-ended", "append: %v", err)
 		}
 		fmt.Printf("  dismissed: %s\n", sid)
@@ -475,13 +470,18 @@ func runPaneDiedHook(args []string) int {
 	if targetSID == "" {
 		return 0
 	}
-
-	_ = state.Append(stateHome, map[string]any{
-		"event_type": state.EventSessionEnd,
-		"session_id": targetSID,
-		"payload":    map[string]any{"synthetic": true, "reason": "pane-died"},
-	})
+	_ = appendSyntheticEnd(stateHome, targetSID, "pane-died")
 	return 0
+}
+
+// appendSyntheticEnd writes a SessionEnd event tagged synthetic. The reducer's
+// pre-revive logic un-dismisses sessions that emit a later real event.
+func appendSyntheticEnd(stateHome, sid, reason string) error {
+	return state.Append(stateHome, map[string]any{
+		"event_type": state.EventSessionEnd,
+		"session_id": sid,
+		"payload":    map[string]any{"synthetic": true, "reason": reason},
+	})
 }
 
 // ---------- dashboard ----------
@@ -534,12 +534,9 @@ func runInstall(args []string) int {
 		}
 	}
 
-	selfPath, err := os.Executable()
+	selfPath, err := resolveSelfPath()
 	if err != nil {
 		die("install", "cannot determine binary path: %v", err)
-	}
-	if real, err := filepath.EvalSymlinks(selfPath); err == nil {
-		selfPath = real
 	}
 
 	binLink := filepath.Join(binDir, "cc-cockpit")
@@ -630,11 +627,10 @@ func runOpen(args []string) int {
 	}
 
 	// Install (or refresh) the global pane-died hook so a crashed Claude pane
-	// auto-emits a synthetic SessionEnd. Best-effort.
-	if selfPath, err := os.Executable(); err == nil {
-		if real, lerr := filepath.EvalSymlinks(selfPath); lerr == nil {
-			selfPath = real
-		}
+	// auto-emits a synthetic SessionEnd. Best-effort. Assumes selfPath has no
+	// shell metacharacters (spaces / single quotes); fine for typical install
+	// locations like ~/.local/bin/cc-cockpit.
+	if selfPath, err := resolveSelfPath(); err == nil {
 		_ = tmux.SetPaneDiedHook(selfPath + " hook PaneDied #{session_name} #{pane_id}")
 	}
 
@@ -826,4 +822,17 @@ func envOrDefault(key, fallback string) string {
 func homeDir() string {
 	h, _ := os.UserHomeDir()
 	return h
+}
+
+// resolveSelfPath returns the absolute path to the running binary with
+// symlinks resolved.
+func resolveSelfPath() (string, error) {
+	p, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real, nil
+	}
+	return p, nil
 }
