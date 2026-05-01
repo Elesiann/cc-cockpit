@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/hook"
 	"github.com/elesiann/cc-cockpit/internal/install"
 	"github.com/elesiann/cc-cockpit/internal/state"
+	"github.com/elesiann/cc-cockpit/internal/tmux"
 	"github.com/elesiann/cc-cockpit/internal/workspace"
 )
 
@@ -183,7 +185,7 @@ func runDoctor(args []string) int {
 		issues++
 	}
 
-	for _, tool := range []string{"zellij", "claude", "cc-cockpit"} {
+	for _, tool := range []string{"tmux", "claude", "cc-cockpit"} {
 		path, err := exec.LookPath(tool)
 		switch {
 		case err == nil:
@@ -192,6 +194,13 @@ func runDoctor(args []string) int {
 			fail("cc-cockpit not found on PATH (run 'cc-cockpit install')")
 		default:
 			fail("%s not found on PATH", tool)
+		}
+	}
+	if v, err := tmux.Version(); err == nil {
+		if checkTmuxVersion(v) {
+			ok("tmux version: %s", v)
+		} else {
+			fail("tmux version too old: %s (need 3.0+)", v)
 		}
 	}
 
@@ -273,6 +282,20 @@ func runDoctor(args []string) int {
 	}
 	fmt.Printf("doctor: %d issue(s) found\n", issues)
 	return 1
+}
+
+var tmuxVersionRe = regexp.MustCompile(`(\d+)\.(\d+)`)
+
+// checkTmuxVersion returns true if version string parses to >= 3.0. Falls
+// open (returns true) for unparseable versions like "tmux master" so dev
+// builds aren't penalized.
+func checkTmuxVersion(v string) bool {
+	m := tmuxVersionRe.FindStringSubmatch(v)
+	if len(m) < 3 {
+		return true
+	}
+	major, _ := strconv.Atoi(m[1])
+	return major >= 3
 }
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -401,7 +424,7 @@ func runHook(args []string) int {
 		PrimaryRepo:          os.Getenv("COCKPIT_PRIMARY_REPO"),
 		DeclaredRelatedRepos: os.Getenv("COCKPIT_DECLARED_RELATED_REPOS"),
 		TaskName:             os.Getenv("COCKPIT_TASK_NAME"),
-		PaneID:               envOrDefault("COCKPIT_PANE_ID", os.Getenv("ZELLIJ_PANE_ID")),
+		PaneID:               envOrDefault("TMUX_PANE", os.Getenv("ZELLIJ_PANE_ID")),
 	}
 	ev := hook.Build(event, sid, payload, env)
 	if ev == nil {
@@ -496,59 +519,9 @@ func runInstall(args []string) int {
 
 // ---------- open ----------
 
-// liveLockFd is intentionally never closed: flock releases when the fd
-// closes, and we want the lock held until zellij exits.
+// liveLockFd is intentionally never closed: the flock releases when the fd
+// closes, and we want the lock held until tmux exits.
 var liveLockFd *os.File
-
-const zellijLayout = `layout {
-    pane split_direction="vertical" {
-        pane size=60 borderless=false {
-            name "cc-cockpit dashboard"
-            command "cc-cockpit"
-            args "dashboard"
-        }
-        pane {
-            name "control"
-            command "bash"
-        }
-    }
-
-    swap_tiled_layout name="cc-cockpit" {
-        tab exact_panes=2 {
-            pane split_direction="vertical" {
-                pane size=60 borderless=false {
-                    name "cc-cockpit dashboard"
-                    command "cc-cockpit"
-                    args "dashboard"
-                }
-                pane {
-                    name "control"
-                    command "bash"
-                }
-            }
-        }
-
-        tab min_panes=3 {
-            pane split_direction="horizontal" {
-                pane split_direction="vertical" size="50%" {
-                    pane size=60 borderless=false {
-                        name "cc-cockpit dashboard"
-                        command "cc-cockpit"
-                        args "dashboard"
-                    }
-                    pane {
-                        name "control"
-                        command "bash"
-                    }
-                }
-                pane split_direction="vertical" {
-                    children
-                }
-            }
-        }
-    }
-}
-`
 
 func runOpen(args []string) int {
 	if len(args) > 0 {
@@ -573,6 +546,9 @@ func runOpen(args []string) int {
 	if !workspace.ValidSlug(ws.Name) {
 		die("open", "invalid workspace name %q (must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$)", ws.Name)
 	}
+	if strings.ContainsAny(ws.Name, ".:") {
+		die("open", "workspace name %q contains '.' or ':', which tmux session names cannot use; rename the workspace", ws.Name)
+	}
 
 	stateRoot := envOrDefault("XDG_STATE_HOME", filepath.Join(homeDir(), ".local", "state"))
 	stateHome := filepath.Join(stateRoot, "cc-cockpit", ws.Name)
@@ -584,36 +560,33 @@ func runOpen(args []string) int {
 		die("open", "%v", err)
 	}
 
-	if _, err := exec.LookPath("zellij"); err != nil {
-		die("open", "zellij not found on PATH")
+	if _, err := exec.LookPath("tmux"); err != nil {
+		die("open", "tmux not found on PATH (need 3.0+)")
 	}
 
 	if err := acquireLiveLock(stateHome, ws.Name); err != nil {
 		die("open", "%v", err)
 	}
 
-	layoutPath := filepath.Join(stateHome, "layout.kdl")
-	if err := os.WriteFile(layoutPath, []byte(zellijLayout), 0o644); err != nil {
-		die("open", "cannot write layout: %v", err)
+	sessionEnv := []string{
+		"COCKPIT_STATE_HOME=" + stateHome,
+		"COCKPIT_WORKSPACE_NAME=" + ws.Name,
+		"CC_COCKPIT_WORKSPACE_ROOT=" + canonical,
+	}
+	if !tmux.HasSession(ws.Name) {
+		if err := tmux.NewSession(ws.Name, sessionEnv); err != nil {
+			die("open", "%v", err)
+		}
 	}
 
 	fmt.Printf("cc-cockpit: workspace=%s  state=%s\n", ws.Name, stateHome)
 
-	cmd := exec.Command("zellij", "--layout", layoutPath)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(),
-		"COCKPIT_STATE_HOME="+stateHome,
-		"COCKPIT_WORKSPACE_NAME="+ws.Name,
-		"CC_COCKPIT_WORKSPACE_ROOT="+canonical,
-	)
-	if err := cmd.Run(); err != nil {
+	if err := tmux.Attach(ws.Name); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			return exitErr.ExitCode()
 		}
-		die("open", "zellij: %v", err)
+		die("open", "tmux: %v", err)
 	}
 	return 0
 }
@@ -737,12 +710,9 @@ func runSpawn(args []string) int {
 	if task == "" {
 		die(cmdName, "task required (usage: cc-cockpit %s <repo> <task...>)", cmdName)
 	}
-	if os.Getenv("ZELLIJ") == "" {
-		die(cmdName, "must be run inside a Zellij session (launched by 'cc-cockpit open')")
-	}
 	stateHome := os.Getenv("COCKPIT_STATE_HOME")
 	if stateHome == "" {
-		die(cmdName, "COCKPIT_STATE_HOME not set")
+		die(cmdName, "must be run inside the cockpit (run 'cc-cockpit open' first)")
 	}
 	wsRoot := os.Getenv("CC_COCKPIT_WORKSPACE_ROOT")
 	if wsRoot == "" {
@@ -771,28 +741,16 @@ func runSpawn(args []string) int {
 		paneName = paneName[:60]
 	}
 
-	cmd := exec.Command("zellij", "action", "new-pane",
-		"--cwd", abs,
-		"--name", paneName,
-		"--",
-		"env",
+	windowEnv := []string{
 		"COCKPIT_SESSION_ACTIVE=1",
-		"COCKPIT_STATE_HOME="+stateHome,
-		"COCKPIT_WORKSPACE_NAME="+workspaceName,
-		"COCKPIT_PRIMARY_REPO="+repo,
-		"COCKPIT_DECLARED_RELATED_REPOS="+related,
-		"COCKPIT_TASK_NAME="+task,
-		"claude",
-	)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return exitErr.ExitCode()
-		}
-		die(cmdName, "zellij: %v", err)
+		"COCKPIT_STATE_HOME=" + stateHome,
+		"COCKPIT_WORKSPACE_NAME=" + workspaceName,
+		"COCKPIT_PRIMARY_REPO=" + repo,
+		"COCKPIT_DECLARED_RELATED_REPOS=" + related,
+		"COCKPIT_TASK_NAME=" + task,
+	}
+	if _, err := tmux.NewWindow(workspaceName, paneName, abs, windowEnv, "claude"); err != nil {
+		die(cmdName, "%v", err)
 	}
 	return 0
 }
