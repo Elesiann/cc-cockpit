@@ -26,7 +26,7 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/workspace"
 )
 
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 func main() {
 	if len(os.Args) < 2 {
