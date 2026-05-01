@@ -24,6 +24,10 @@ raw-payloads/
 *.bak
 *.bak-*
 
+# Go build artifacts (binaries land in cwd when built without -o)
+/cc-cockpit
+/cc-cockpit-reduce
+
 # Dashboard stage stderr capture files (runtime only)
 snapshot.err
 reduce.err
