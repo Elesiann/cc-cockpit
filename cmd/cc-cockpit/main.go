@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/elesiann/cc-cockpit/internal/state"
 	"github.com/elesiann/cc-cockpit/internal/workspace"
 )
 
@@ -34,6 +35,8 @@ func main() {
 		os.Exit(runInit(args))
 	case "doctor":
 		os.Exit(runDoctor(args))
+	case "mark-ended":
+		os.Exit(runMarkEnded(args))
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -50,10 +53,11 @@ Available subcommands (during the bash → Go migration):
   --version           print version
   init                create .cc-cockpit/workspace.json
   doctor              check install + workspace health
+  mark-ended          dismiss stale sessions (synthetic SessionEnd)
   help                show this message
 
-Other subcommands (open, start, hook, mark-ended) are still served by the bash
-binary at .cc-cockpit/bin/cc-cockpit.`)
+Other subcommands (open, start, hook) are still served by the bash binary
+at .cc-cockpit/bin/cc-cockpit.`)
 }
 
 func die(prefix, format string, args ...any) {
@@ -310,4 +314,81 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// ---------- mark-ended ----------
+
+func runMarkEnded(args []string) int {
+	// Hand-parse so --yes/-y can appear anywhere (matches bash behavior).
+	var yes bool
+	var posArgs []string
+	for _, a := range args {
+		switch a {
+		case "--yes", "-y":
+			yes = true
+		default:
+			if strings.HasPrefix(a, "-") {
+				die("mark-ended", "unknown flag %q", a)
+			}
+			posArgs = append(posArgs, a)
+		}
+	}
+	if len(posArgs) == 0 {
+		die("mark-ended", "need <session_id-prefix> (or 'all-non-ended') [--yes]")
+	}
+	if len(posArgs) > 1 {
+		die("mark-ended", "only one positional argument expected")
+	}
+	prefix := posArgs[0]
+
+	stateHome := os.Getenv("COCKPIT_STATE_HOME")
+	if stateHome == "" {
+		die("mark-ended", "COCKPIT_STATE_HOME not set (run inside 'cc-cockpit open')")
+	}
+
+	logPath := filepath.Join(stateHome, "events.jsonl")
+	f, err := os.Open(logPath)
+	if err != nil {
+		die("mark-ended", "no events.jsonl in %s", stateHome)
+	}
+	st := state.Reduce(f)
+	_ = f.Close()
+
+	var targets []string
+	for sid, sess := range st.Sessions {
+		if sess.Status == "ended" {
+			continue
+		}
+		if prefix == "all-non-ended" || strings.HasPrefix(sid, prefix) {
+			targets = append(targets, sid)
+		}
+	}
+	sort.Strings(targets)
+
+	if len(targets) == 0 {
+		fmt.Printf("mark-ended: no matching non-ended sessions for %q\n", prefix)
+		return 0
+	}
+
+	if len(targets) > 1 && !yes {
+		fmt.Fprintf(os.Stderr, "mark-ended: would dismiss %d session(s):\n", len(targets))
+		for _, sid := range targets {
+			fmt.Fprintf(os.Stderr, "  - %s\n", sid)
+		}
+		die("mark-ended", "re-run with --yes to confirm (or give a more specific prefix)")
+	}
+
+	for _, sid := range targets {
+		ev := map[string]any{
+			"event_type": "SessionEnd",
+			"session_id": sid,
+			"payload":    map[string]any{"synthetic": true, "reason": "operator-dismissed"},
+		}
+		if err := state.Append(stateHome, ev); err != nil {
+			die("mark-ended", "append: %v", err)
+		}
+		fmt.Printf("  dismissed: %s\n", sid)
+	}
+	fmt.Printf("mark-ended: %d session(s) dismissed (any later event from a live session will un-dismiss).\n", len(targets))
+	return 0
 }
