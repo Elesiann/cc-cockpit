@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -396,6 +397,10 @@ func runHook(args []string) int {
 	}
 	event := args[0]
 
+	if event == "PaneDied" {
+		return runPaneDiedHook(args[1:])
+	}
+
 	if os.Getenv("COCKPIT_SESSION_ACTIVE") != "1" {
 		return 0
 	}
@@ -431,6 +436,51 @@ func runHook(args []string) int {
 		return 0
 	}
 	_ = state.Append(stateHome, ev)
+	return 0
+}
+
+// runPaneDiedHook is fired by tmux's global pane-died hook. Looks up the
+// session whose SessionStart recorded the crashed pane and emits a synthetic
+// SessionEnd so the dashboard moves it to the ended footer.
+func runPaneDiedHook(args []string) int {
+	if len(args) < 2 {
+		return 0
+	}
+	sessionName, paneID := args[0], args[1]
+	if !workspace.ValidSlug(sessionName) || paneID == "" {
+		return 0
+	}
+
+	stateRoot := envOrDefault("XDG_STATE_HOME", filepath.Join(homeDir(), ".local", "state"))
+	stateHome := filepath.Join(stateRoot, "cc-cockpit", sessionName)
+
+	f, err := os.Open(filepath.Join(stateHome, "events.jsonl"))
+	if err != nil {
+		return 0
+	}
+	st := state.Reduce(f)
+	_ = f.Close()
+
+	paneJSON, _ := json.Marshal(paneID)
+	var targetSID string
+	for sid, sess := range st.Sessions {
+		if sess.Status == state.StatusEnded {
+			continue
+		}
+		if bytes.Equal(sess.PaneID, paneJSON) {
+			targetSID = sid
+			break
+		}
+	}
+	if targetSID == "" {
+		return 0
+	}
+
+	_ = state.Append(stateHome, map[string]any{
+		"event_type": state.EventSessionEnd,
+		"session_id": targetSID,
+		"payload":    map[string]any{"synthetic": true, "reason": "pane-died"},
+	})
 	return 0
 }
 
@@ -577,6 +627,15 @@ func runOpen(args []string) int {
 		if err := tmux.NewSession(ws.Name, sessionEnv); err != nil {
 			die("open", "%v", err)
 		}
+	}
+
+	// Install (or refresh) the global pane-died hook so a crashed Claude pane
+	// auto-emits a synthetic SessionEnd. Best-effort.
+	if selfPath, err := os.Executable(); err == nil {
+		if real, lerr := filepath.EvalSymlinks(selfPath); lerr == nil {
+			selfPath = real
+		}
+		_ = tmux.SetPaneDiedHook(selfPath + " hook PaneDied #{session_name} #{pane_id}")
 	}
 
 	fmt.Printf("cc-cockpit: workspace=%s  state=%s\n", ws.Name, stateHome)
