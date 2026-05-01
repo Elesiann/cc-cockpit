@@ -1,5 +1,5 @@
 // Package install handles `cc-cockpit install`: symlinks the binary onto
-// PATH and idempotently merges the cc-cockpit hooks into ~/.claude/settings.json.
+// PATH and merges the cc-cockpit hooks into ~/.claude/settings.json.
 package install
 
 import (
@@ -10,24 +10,24 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
-// Events is the canonical list of Claude Code hooks cc-cockpit subscribes to.
+// Events is the list of Claude Code hooks cc-cockpit subscribes to.
 var Events = []string{
-	"SessionStart",
-	"UserPromptSubmit",
-	"PermissionRequest",
-	"Notification",
-	"PostToolUse",
-	"Stop",
-	"SessionEnd",
+	state.EventSessionStart,
+	state.EventUserPromptSubmit,
+	state.EventPermissionRequest,
+	state.EventNotification,
+	state.EventPostToolUse,
+	state.EventStop,
+	state.EventSessionEnd,
 }
 
 // MergeHooks idempotently installs cc-cockpit hooks into a Claude settings
-// document. Existing entries whose .hooks[].command contains "cc-cockpit hook "
-// are replaced; everything else is preserved. Returns the new bytes.
-//
-// existing may be empty (treated as {}).
+// document. Entries whose .hooks[].command contains "cc-cockpit hook " are
+// replaced; everything else is preserved. Empty input is treated as {}.
 func MergeHooks(existing []byte, binPath string) ([]byte, error) {
 	top := map[string]any{}
 	if len(bytes.TrimSpace(existing)) > 0 {
@@ -55,7 +55,7 @@ func MergeHooks(existing []byte, binPath string) ([]byte, error) {
 				map[string]any{"type": "command", "command": binPath + " hook " + ev},
 			},
 		}
-		if ev == "Notification" {
+		if ev == state.EventNotification {
 			entry["matcher"] = "idle_prompt|permission_prompt"
 		}
 		hooksAny[ev] = append(kept, entry)
@@ -72,8 +72,10 @@ func MergeHooks(existing []byte, binPath string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// entryHasCockpitHook reports whether a settings hook-entry already contains
-// a cc-cockpit hook command (matches the bash version's substring check).
+// EntryHasCockpitHook reports whether a settings hook-entry contains a
+// cc-cockpit hook command. Exposed so doctor can reuse it.
+func EntryHasCockpitHook(e any) bool { return entryHasCockpitHook(e) }
+
 func entryHasCockpitHook(e any) bool {
 	entry, _ := e.(map[string]any)
 	if entry == nil {
@@ -90,9 +92,22 @@ func entryHasCockpitHook(e any) bool {
 	return false
 }
 
-// InstallHooks reads settingsPath, merges cc-cockpit hooks pointing at binPath,
-// backs up the existing file (`<path>.bak-<ts>`) if it would change, and
-// writes the new settings atomically. No-op if nothing would change.
+// EntryHasMatcher reports whether a hook entry uses the given matcher AND
+// has a cc-cockpit command. Used by doctor to verify the Notification matcher.
+func EntryHasMatcher(e any, matcher string) bool {
+	entry, _ := e.(map[string]any)
+	if entry == nil {
+		return false
+	}
+	if m, _ := entry["matcher"].(string); m != matcher {
+		return false
+	}
+	return entryHasCockpitHook(e)
+}
+
+// InstallHooks merges cc-cockpit hooks into settingsPath (creating it if
+// missing). Backs up the existing file as .bak-<ts> when it would change;
+// no-op if the merge result equals the existing content.
 func InstallHooks(settingsPath, binPath string) error {
 	dir := filepath.Dir(settingsPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -127,9 +142,8 @@ func InstallHooks(settingsPath, binPath string) error {
 	return os.Rename(tmp, settingsPath)
 }
 
-// InstallBin places binDir/cc-cockpit pointing at selfPath. If a symlink to
-// the same target already exists, no-op. Existing other files / symlinks are
-// replaced.
+// InstallBin symlinks binDir/cc-cockpit -> selfPath. No-op if the symlink
+// already points there; otherwise replaces whatever's there.
 func InstallBin(binDir, selfPath string) error {
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		return fmt.Errorf("cannot create bin dir %q: %w", binDir, err)

@@ -1,5 +1,4 @@
-// Package workspace handles .cc-cockpit/workspace.json — discovery, parsing,
-// validation, and repo containment checks.
+// Package workspace handles .cc-cockpit/workspace.json.
 package workspace
 
 import (
@@ -22,15 +21,13 @@ type Workspace struct {
 	Repos map[string]string `json:"repos"`
 }
 
-// ValidSlug reports whether s is a safe workspace or repo label
-// (alnum + . _ -, must start with alnum, no slashes, no traversal).
 func ValidSlug(s string) bool {
 	return slugRe.MatchString(s)
 }
 
-// SlugFromPath builds a slug from a directory path's basename:
-// any rune outside [a-zA-Z0-9._-] becomes '-', leading non-alnums are stripped,
-// empty result becomes "workspace". Mirrors slug_from_path() in bash.
+// SlugFromPath builds a slug from a path's basename: non-[a-zA-Z0-9._-]
+// runes become '-', leading non-alnums are stripped, empty becomes
+// "workspace".
 func SlugFromPath(path string) string {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -63,8 +60,8 @@ func SlugFromPath(path string) string {
 	return s
 }
 
-// FindRoot walks up from start until it finds a directory containing
-// .cc-cockpit/workspace.json. Returns "" if none is found.
+// FindRoot walks up from start looking for .cc-cockpit/workspace.json.
+// Returns "" if none is found.
 func FindRoot(start string) string {
 	d, err := filepath.Abs(start)
 	if err != nil {
@@ -82,9 +79,6 @@ func FindRoot(start string) string {
 	}
 }
 
-// Load reads and parses root/.cc-cockpit/workspace.json. Returns a typed
-// Workspace; callers should check ValidSlug(ws.Name) and len(ws.Repos)
-// for stricter validation.
 func Load(root string) (*Workspace, error) {
 	path := filepath.Join(root, ".cc-cockpit", "workspace.json")
 	raw, err := os.ReadFile(path)
@@ -98,7 +92,6 @@ func Load(root string) (*Workspace, error) {
 	return &ws, nil
 }
 
-// Save writes ws atomically to root/.cc-cockpit/workspace.json (tmp + rename).
 func (ws *Workspace) Save(root string) error {
 	dir := filepath.Join(root, ".cc-cockpit")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -127,8 +120,7 @@ func (ws *Workspace) Save(root string) error {
 
 // AddRepo validates and adds (label, path) to ws. Path may be relative
 // (resolved against root) or absolute; either way it must resolve inside
-// root and point to an existing git repo. The stored value is the path
-// relative to root.
+// root and point to an existing git repo.
 func (ws *Workspace) AddRepo(root, label, path string) error {
 	if !ValidSlug(label) {
 		return fmt.Errorf("invalid repo label %q (must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$)", label)
@@ -147,15 +139,14 @@ func (ws *Workspace) AddRepo(root, label, path string) error {
 	return nil
 }
 
-// CheckRepo validates a repo entry already stored in workspace.json.
-// Same checks as AddRepo without the duplicate-label test.
+// CheckRepo validates a repo entry stored in workspace.json.
 func CheckRepo(root, rel string) error {
 	_, _, err := resolveRepo(root, rel)
 	return err
 }
 
-// Resolve looks up label in ws.Repos, validates the entry against root, and
-// returns the absolute canonical path. Use for spawn-time --cwd args.
+// Resolve looks up label in ws.Repos and returns its absolute canonical path
+// inside root. Used for spawn-time --cwd args.
 func (ws *Workspace) Resolve(root, label string) (string, error) {
 	rel, ok := ws.Repos[label]
 	if !ok {
@@ -173,8 +164,6 @@ func (ws *Workspace) Resolve(root, label string) (string, error) {
 	return abs, nil
 }
 
-// resolveRepo canonicalizes path against root, asserts containment + dir +
-// git-repo. Returns (relPathFromRoot, absResolvedPath, error).
 func resolveRepo(root, path string) (relPath, absPath string, err error) {
 	rootReal, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -202,9 +191,8 @@ func resolveRepo(root, path string) (relPath, absPath string, err error) {
 	return relPath, absPath, nil
 }
 
-// DiscoverRepos returns absolute paths of child git repos found at depths
-// 1–3 under root (i.e. their .git/ at depths 2–4). Mirrors the bash
-// find -mindepth 2 -maxdepth 4 -type d -name .git -prune.
+// DiscoverRepos returns absolute paths of child git repos at depths 1–3
+// under root (.git/ at depths 2–4 to match `find -mindepth 2 -maxdepth 4`).
 func DiscoverRepos(root string) ([]string, error) {
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {

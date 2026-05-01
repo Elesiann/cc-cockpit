@@ -9,18 +9,13 @@ import (
 	"time"
 )
 
-// Reduce consumes events.jsonl from r and returns the reduced state.
-//
-// Mirrors reduce-state.sh exactly:
-//   - Skips empty lines.
-//   - Drops malformed JSON, validates required fields, drops events that fail.
-//   - Counts non-empty-but-invalid lines into State.DroppedEvents.
-//   - Sorts surviving events by seq (stable) then applies them in order.
+// Reduce consumes events.jsonl from r and returns the reduced state. Skips
+// empty lines, drops events that fail validation, and counts dropped lines
+// in State.DroppedEvents.
 func Reduce(r io.Reader) State {
 	state := State{Sessions: make(map[string]*Session)}
 
 	scanner := bufio.NewScanner(r)
-	// Default buffer is 64KiB; events can include long prompt previews. Allow up to 16MiB per line.
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 
 	var totalLines, validCount int
@@ -40,7 +35,6 @@ func Reduce(r io.Reader) State {
 		if !isValidEvent(&ev) {
 			continue
 		}
-		// Normalize payload: missing or null becomes {}.
 		if len(ev.Payload) == 0 || bytes.Equal(ev.Payload, jsonNull) {
 			ev.Payload = json.RawMessage("{}")
 		}
@@ -60,13 +54,12 @@ func Reduce(r io.Reader) State {
 	return state
 }
 
-// isValidEvent mirrors the jq validation block in reduce-state.sh.
 func isValidEvent(ev *Event) bool {
 	if ev.WallClockISO8601 == "" {
 		return false
 	}
 	if _, err := time.Parse(time.RFC3339, ev.WallClockISO8601); err != nil {
-		// jq's fromdateiso8601 also accepts fractional seconds; try RFC3339Nano as a fallback.
+		// jq's fromdateiso8601 also accepts fractional seconds.
 		if _, err2 := time.Parse(time.RFC3339Nano, ev.WallClockISO8601); err2 != nil {
 			return false
 		}
@@ -74,7 +67,6 @@ func isValidEvent(ev *Event) bool {
 	if ev.EventType == "" || ev.SessionID == "" {
 		return false
 	}
-	// payload: missing OR null OR object
 	if len(ev.Payload) > 0 && !bytes.Equal(ev.Payload, jsonNull) {
 		trimmed := bytes.TrimLeft(ev.Payload, " \t\n\r")
 		if len(trimmed) == 0 || trimmed[0] != '{' {
@@ -87,17 +79,18 @@ func isValidEvent(ev *Event) bool {
 func applyEvent(state *State, ev *Event) {
 	state.LastSeq = ev.Seq
 
-	// Pre-revive: a dismissed session receiving any non-SessionEnd event comes back as running.
-	if sess, ok := state.Sessions[ev.SessionID]; ok && isDismissed(sess) && ev.EventType != "SessionEnd" {
+	// Pre-revive: a dismissed session that emits any non-SessionEnd event
+	// comes back as running.
+	if sess, ok := state.Sessions[ev.SessionID]; ok && isDismissed(sess) && ev.EventType != EventSessionEnd {
 		f := false
-		sess.Status = "running"
+		sess.Status = StatusRunning
 		sess.Dismissed = &f
 		sess.RevivedAt = ev.WallClockISO8601
 		sess.EndedAt = jsonNull
 	}
 
 	switch ev.EventType {
-	case "SessionStart":
+	case EventSessionStart:
 		sess, ok := state.Sessions[ev.SessionID]
 		if ok {
 			sess.LastActivity = ev.WallClockISO8601
@@ -108,12 +101,12 @@ func applyEvent(state *State, ev *Event) {
 		}
 		state.Sessions[ev.SessionID] = newSessionFromStart(ev)
 
-	case "UserPromptSubmit":
+	case EventUserPromptSubmit:
 		sess, ok := state.Sessions[ev.SessionID]
-		if !ok || sess.Status == "ended" {
+		if !ok || sess.Status == StatusEnded {
 			return
 		}
-		sess.Status = "running"
+		sess.Status = StatusRunning
 		sess.LastActivity = ev.WallClockISO8601
 		var p struct {
 			PromptPreview json.RawMessage `json:"prompt_preview"`
@@ -124,39 +117,39 @@ func applyEvent(state *State, ev *Event) {
 		}
 		sess.LastPromptPreview = p.PromptPreview
 
-	case "PermissionRequest", "Notification":
+	case EventPermissionRequest, EventNotification:
 		sess, ok := state.Sessions[ev.SessionID]
-		if !ok || sess.Status == "ended" {
+		if !ok || sess.Status == StatusEnded {
 			return
 		}
-		sess.Status = "waiting_input"
+		sess.Status = StatusWaitingInput
 		sess.LastActivity = ev.WallClockISO8601
 
-	case "PostToolUse":
+	case EventPostToolUse:
 		sess, ok := state.Sessions[ev.SessionID]
 		if !ok {
 			return
 		}
-		if sess.Status == "waiting_input" {
-			sess.Status = "running"
+		if sess.Status == StatusWaitingInput {
+			sess.Status = StatusRunning
 		}
 		sess.LastActivity = ev.WallClockISO8601
 
-	case "Stop":
+	case EventStop:
 		sess, ok := state.Sessions[ev.SessionID]
-		if !ok || sess.Status == "ended" {
+		if !ok || sess.Status == StatusEnded {
 			return
 		}
-		sess.Status = "idle"
+		sess.Status = StatusIdle
 		sess.LastActivity = ev.WallClockISO8601
 
-	case "SessionEnd":
+	case EventSessionEnd:
 		sess, ok := state.Sessions[ev.SessionID]
 		if !ok {
 			return
 		}
 		ts, _ := json.Marshal(ev.WallClockISO8601)
-		sess.Status = "ended"
+		sess.Status = StatusEnded
 		sess.EndedAt = ts
 		sess.LastActivity = ev.WallClockISO8601
 
@@ -174,8 +167,8 @@ func isDismissed(s *Session) bool {
 }
 
 // newSessionFromStart copies the SessionStart payload fields into a new
-// Session with status=running. Missing fields default to JSON null —
-// matching jq's behavior where `$e.payload.foo` on a missing key yields null.
+// Session. Missing fields default to JSON null (matches jq's `payload.foo`
+// on a missing key yielding null).
 func newSessionFromStart(ev *Event) *Session {
 	var p struct {
 		PrimaryRepo          json.RawMessage `json:"primary_repo"`
@@ -200,7 +193,7 @@ func newSessionFromStart(ev *Event) *Session {
 		TaskName:             defaultNull(p.TaskName),
 		Cwd:                  defaultNull(p.Cwd),
 		ZellijPaneID:         defaultNull(p.ZellijPaneID),
-		Status:               "running",
+		Status:               StatusRunning,
 		StartedAt:            ev.WallClockISO8601,
 		LastActivity:         ev.WallClockISO8601,
 		LastPromptPreview:    jsonNull,
