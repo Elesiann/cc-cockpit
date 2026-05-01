@@ -175,9 +175,13 @@ func newSessionFromStart(ev *Event) *Session {
 		DeclaredRelatedRepos json.RawMessage `json:"declared_related_repos"`
 		TaskName             json.RawMessage `json:"task_name"`
 		Cwd                  json.RawMessage `json:"cwd"`
-		ZellijPaneID         json.RawMessage `json:"zellij_pane_id"`
+		PaneID               json.RawMessage `json:"pane_id"`
+		LegacyPaneID         json.RawMessage `json:"zellij_pane_id"` // pre-v0.3 logs
 	}
 	_ = json.Unmarshal(ev.Payload, &p)
+	if len(p.PaneID) == 0 {
+		p.PaneID = p.LegacyPaneID
+	}
 
 	defaultNull := func(b json.RawMessage) json.RawMessage {
 		if len(b) == 0 {
@@ -192,7 +196,7 @@ func newSessionFromStart(ev *Event) *Session {
 		DeclaredRelatedRepos: defaultNull(p.DeclaredRelatedRepos),
 		TaskName:             defaultNull(p.TaskName),
 		Cwd:                  defaultNull(p.Cwd),
-		ZellijPaneID:         defaultNull(p.ZellijPaneID),
+		PaneID:               defaultNull(p.PaneID),
 		Status:               StatusRunning,
 		StartedAt:            ev.WallClockISO8601,
 		LastActivity:         ev.WallClockISO8601,

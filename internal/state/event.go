@@ -41,7 +41,7 @@ type Session struct {
 	DeclaredRelatedRepos json.RawMessage `json:"declared_related_repos"`
 	TaskName             json.RawMessage `json:"task_name"`
 	Cwd                  json.RawMessage `json:"cwd"`
-	ZellijPaneID         json.RawMessage `json:"zellij_pane_id"`
+	PaneID               json.RawMessage `json:"pane_id"`
 	Status               string          `json:"status"`
 	StartedAt            string          `json:"started_at"`
 	LastActivity         string          `json:"last_activity"`

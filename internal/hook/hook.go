@@ -8,12 +8,12 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
-// Env carries COCKPIT_* + ZELLIJ_PANE_ID values that SessionStart embeds.
+// Env carries the COCKPIT_* values that SessionStart embeds.
 type Env struct {
 	PrimaryRepo          string
 	DeclaredRelatedRepos string // raw, comma-separated
 	TaskName             string
-	ZellijPaneID         string
+	PaneID               string
 }
 
 // Build returns the event envelope for (event, payload, env), or nil if the
@@ -22,16 +22,16 @@ type Env struct {
 func Build(event, sessionID string, payload map[string]any, env Env) map[string]any {
 	switch event {
 	case state.EventSessionStart:
-		var zpane any
-		if env.ZellijPaneID != "" {
-			zpane = env.ZellijPaneID
+		var pane any
+		if env.PaneID != "" {
+			pane = env.PaneID
 		}
 		return envelope(event, sessionID, map[string]any{
 			"primary_repo":           env.PrimaryRepo,
 			"declared_related_repos": splitCSV(env.DeclaredRelatedRepos),
 			"task_name":              env.TaskName,
 			"cwd":                    payload["cwd"],
-			"zellij_pane_id":         zpane,
+			"pane_id":                pane,
 			"source":                 payload["source"],
 			"model":                  payload["model"],
 		})

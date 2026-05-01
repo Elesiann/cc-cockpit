@@ -11,7 +11,7 @@ func TestBuild_SessionStart_PullsFromEnvAndPayload(t *testing.T) {
 		PrimaryRepo:          "api",
 		DeclaredRelatedRepos: "web,infra",
 		TaskName:             "fix bug",
-		ZellijPaneID:         "%42",
+		PaneID:               "%42",
 	}
 	payload := map[string]any{
 		"cwd":    "/repos/api",
@@ -32,8 +32,8 @@ func TestBuild_SessionStart_PullsFromEnvAndPayload(t *testing.T) {
 	if p["cwd"] != "/repos/api" {
 		t.Errorf("cwd: got %v, want /repos/api", p["cwd"])
 	}
-	if p["zellij_pane_id"] != "%42" {
-		t.Errorf("zellij_pane_id: got %v, want %%42", p["zellij_pane_id"])
+	if p["pane_id"] != "%42" {
+		t.Errorf("pane_id: got %v, want %%42", p["pane_id"])
 	}
 	related := p["declared_related_repos"].([]string)
 	if !reflect.DeepEqual(related, []string{"web", "infra"}) {
@@ -41,11 +41,11 @@ func TestBuild_SessionStart_PullsFromEnvAndPayload(t *testing.T) {
 	}
 }
 
-func TestBuild_SessionStart_EmptyZellijPaneIsNil(t *testing.T) {
+func TestBuild_SessionStart_EmptyPaneIsNil(t *testing.T) {
 	got := Build("SessionStart", "sid", map[string]any{}, Env{})
 	p := got["payload"].(map[string]any)
-	if p["zellij_pane_id"] != nil {
-		t.Errorf("empty ZELLIJ_PANE_ID should map to nil, got %#v", p["zellij_pane_id"])
+	if p["pane_id"] != nil {
+		t.Errorf("empty PaneID should map to nil, got %#v", p["pane_id"])
 	}
 }
 

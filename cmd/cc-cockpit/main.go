@@ -401,7 +401,7 @@ func runHook(args []string) int {
 		PrimaryRepo:          os.Getenv("COCKPIT_PRIMARY_REPO"),
 		DeclaredRelatedRepos: os.Getenv("COCKPIT_DECLARED_RELATED_REPOS"),
 		TaskName:             os.Getenv("COCKPIT_TASK_NAME"),
-		ZellijPaneID:         os.Getenv("ZELLIJ_PANE_ID"),
+		PaneID:               envOrDefault("COCKPIT_PANE_ID", os.Getenv("ZELLIJ_PANE_ID")),
 	}
 	ev := hook.Build(event, sid, payload, env)
 	if ev == nil {
