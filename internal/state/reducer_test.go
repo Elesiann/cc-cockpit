@@ -157,6 +157,17 @@ func TestReducer_PostToolUseUpdatesActivityWithoutResettingIdle(t *testing.T) {
 	}
 }
 
+func TestReducer_LegacyZellijPaneIDFieldStillRead(t *testing.T) {
+	// Pre-v0.3 logs have zellij_pane_id in the SessionStart payload. The
+	// reducer reads either field name and stores it in PaneID for back-compat.
+	input := `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"r","task_name":"t","declared_related_repos":[],"zellij_pane_id":"%9"}}`
+	st := Reduce(strings.NewReader(input))
+	got := string(st.Sessions["s1"].PaneID)
+	if got != `"%9"` {
+		t.Errorf("PaneID from legacy zellij_pane_id: got %q, want \"%%9\"", got)
+	}
+}
+
 func TestReducer_EventForUnknownSessionIsIgnored(t *testing.T) {
 	// Events for sessions we never saw a SessionStart for must be ignored
 	// (except we still count last_seq).

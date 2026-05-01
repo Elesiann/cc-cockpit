@@ -18,7 +18,7 @@ func sessAt(status, started, lastAct string, repo, task string) *state.Session {
 		TaskName:             json.RawMessage(`"` + task + `"`),
 		DeclaredRelatedRepos: json.RawMessage("[]"),
 		Cwd:                  json.RawMessage("null"),
-		ZellijPaneID:         json.RawMessage("null"),
+		PaneID:               json.RawMessage("null"),
 		LastPromptPreview:    json.RawMessage("null"),
 	}
 }
