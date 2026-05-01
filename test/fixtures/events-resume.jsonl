@@ -1,0 +1,5 @@
+{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"api","task_name":"work","declared_related_repos":[],"cwd":"/repos/api","zellij_pane_id":"%1"}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"UserPromptSubmit","session_id":"s1","payload":{"prompt_preview":"first"}}
+{"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"Stop","session_id":"s1","payload":{}}
+{"seq":4,"wall_clock_iso8601":"2026-04-20T15:00:03Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"api","task_name":"work","declared_related_repos":[],"cwd":"/repos/api","zellij_pane_id":"%1"}}
+{"seq":5,"wall_clock_iso8601":"2026-04-20T15:00:04Z","event_type":"UserPromptSubmit","session_id":"s1","payload":{"prompt_preview":"second"}}
