@@ -3,16 +3,16 @@
 **A workspace supervisor for running N Claude Code sessions across M independent repos — without forcing them into a single git tree.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Status](https://img.shields.io/badge/status-v0.1.0--mvp-orange)
+![Status](https://img.shields.io/badge/status-v0.2.0-orange)
 
 ---
 
 ## Quickstart
 
 ```bash
-# one time, from the cc-cockpit source checkout
-cd ~/cc-cockpit
-./install
+# one time: build & install the binary plus the Claude Code hooks
+go install github.com/elesiann/cc-cockpit/cmd/cc-cockpit@latest
+cc-cockpit install
 
 # one time, from the directory that contains your child git repos
 cd ~/my-workspace
@@ -30,8 +30,6 @@ cc-cockpit start api fix auth bug
 ```
 
 Command words are literal: `install` sets up your machine, `init` creates workspace config, `open` opens the cockpit, and `start` starts a session.
-
-`./install` is only available in the cloned `cc-cockpit` source checkout. After that, use the installed `cc-cockpit` command from your workspaces.
 
 ---
 
@@ -63,7 +61,7 @@ This is the differentiator. **Agent orchestrators locked to one git repo are leg
 - **`cc-cockpit start api fix auth bug`** — opens a new pane running Claude Code inside the `api` child repo, with the right env wired in.
 - **Dashboard** — auto-updates every 0.5s, shows status (`running` / `waiting_input` / `idle` / `ended`) for every session, rings the terminal bell the moment any agent enters `waiting_input`.
 
-All of this is bash + jq + Zellij. A few hundred lines of shell, no daemon, no background process, no database — just an event-sourced append log per workspace and a deterministic reducer.
+All of this is a single Go binary driving Zellij. No daemon, no background process, no database — just an event-sourced append log per workspace and a deterministic reducer.
 
 ---
 
@@ -111,36 +109,41 @@ Three planes you always have in your head:
 |---|---|
 | Workspace parent | Any directory with `.cc-cockpit/workspace.json` (doesn't need to be a git repo) |
 | Child repo | An independent git repo inside the workspace parent. Sessions only run inside a child, never the parent. |
-| Source tree (scripts) | Wherever you cloned this repo. The `cc-cockpit` binary on your `PATH` symlinks into `.cc-cockpit/bin/`. |
-| Runtime state | `$XDG_STATE_HOME/cc-cockpit/<workspace-name>/` — `events.jsonl`, `current.json`, `seq.counter`, `events.lock` |
+| Binary | A single static Go binary on `PATH` (typically `~/.local/bin/cc-cockpit`) — no sibling files needed |
+| Runtime state | `$XDG_STATE_HOME/cc-cockpit/<workspace-name>/` — `events.jsonl`, `current.json`, `events.lock` |
 | Hooks | Global `~/.claude/settings.json` — absolute path to the binary; silent no-op unless `COCKPIT_SESSION_ACTIVE=1` is in the env |
 
 ---
 
 ## Prerequisites
 
-- Linux / WSL2. macOS has not been tested.
+- Linux, macOS, or WSL2.
 - [`zellij`](https://zellij.dev/) 0.44+ on `PATH`.
-- `jq` 1.7+.
 - Claude Code 2.1+ with the hook event model (SessionStart, PostToolUse, Stop, SessionEnd, Notification, PermissionRequest, UserPromptSubmit).
-- Bash 5+.
+- Go 1.22+ if building from source.
 
 ---
 
 ## Install
 
-```bash
-# clone the cockpit source wherever you like
-git clone https://github.com/<you>/cc-cockpit.git ~/cc-cockpit
-cd ~/cc-cockpit
+There are two ways to get the binary onto your `PATH`. After either one, run `cc-cockpit install` to register the Claude Code hooks.
 
-# install the cc-cockpit command and Claude Code hooks
-./install
+```bash
+# Option A — build from source (recommended for now):
+go install github.com/elesiann/cc-cockpit/cmd/cc-cockpit@latest
+
+# Option B — download a release binary (when releases are published):
+curl -L https://github.com/elesiann/cc-cockpit/releases/latest/download/cc-cockpit-linux-amd64 \
+  -o ~/.local/bin/cc-cockpit
+chmod +x ~/.local/bin/cc-cockpit
+
+# Then, regardless of how you got the binary:
+cc-cockpit install
 ```
 
-Run `./install` from the `cc-cockpit` source checkout only. It creates `~/.local/bin/cc-cockpit`, backs up `~/.claude/settings.json` if it must change, and installs the hook entries idempotently. No manual hook merge is needed.
+`cc-cockpit install` symlinks the binary into `~/.local/bin/` (idempotent), backs up `~/.claude/settings.json` if it would change, and merges the cc-cockpit hook entries. Re-run any time without fear of duplicates.
 
-If `cc-cockpit` is still not found after install, make sure `~/.local/bin` is on your shell `PATH`.
+Useful flags: `--bin-dir DIR`, `--settings FILE`, `--no-bin`, `--no-hooks`. If `cc-cockpit` is still not found afterwards, make sure `~/.local/bin` is on your shell `PATH`.
 
 The `Notification` hook uses `matcher: "idle_prompt|permission_prompt"` — this is the real signal that Claude is waiting on you (validated empirically against real Claude Code payloads before the hook was wired).
 
@@ -234,8 +237,7 @@ Dismissal is non-terminal: if the matched session turns out to still be live, th
 
 | Command | Use |
 |---|---|
-| `./install` | From the `cc-cockpit` source checkout only: install the command on `PATH` and install Claude Code hooks. |
-| `cc-cockpit install` | Re-run the installer after the command is already available, or use advanced flags like `--settings`. |
+| `cc-cockpit install [--bin-dir DIR] [--settings FILE] [--no-bin] [--no-hooks]` | Symlink the binary onto `PATH` and merge Claude Code hooks. Idempotent; backs up existing settings. |
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create `.cc-cockpit/workspace.json`; with no repo specs, auto-discovers child git repos. |
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
@@ -261,7 +263,7 @@ Dismissal is non-terminal: if the matched session turns out to still be live, th
 1. When you `start`, `cc-cockpit` invokes `zellij action new-pane ... env COCKPIT_SESSION_ACTIVE=1 ... claude`.
 2. The `SessionStart` hook in `~/.claude/settings.json` fires. It's a silent no-op unless `COCKPIT_SESSION_ACTIVE=1` — so global hooks don't pollute non-cockpit Claude sessions.
 3. Every event (`SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`) appends an envelope to `events.jsonl` under an exclusive `flock`. Sequence numbers are monotonic; wall-clock is advisory.
-4. The dashboard pane loops every 0.5s: snapshots the log under a shared `flock`, runs a pure-jq reducer to produce `current.json`, renders, and rings the bell on new `waiting_input` entrants.
+4. The dashboard pane loops every 0.5s: snapshots the log under a shared `flock`, runs the reducer in-process to produce `current.json`, renders, and rings the bell on new `waiting_input` entrants.
 5. There is no daemon. No IPC. No database. If the dashboard dies, `events.jsonl` keeps growing; on restart, the reducer reconstructs everything.
 
 Everything else is consequences of those five points.
@@ -296,14 +298,11 @@ rm -rf ~/.local/state/cc-cockpit/<workspace-name>/
 
 **Inspect raw events:**
 ```bash
-jq -c . ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl | less -R
+cat ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl
+# (jq -c . is optional, but works; the reducer reads JSONL)
 ```
 
-**Dashboard shows `⚠ dropped=N` in the header** — the reducer skipped N malformed lines in `events.jsonl` (truncated writes, disk-full mid-append, manual edits). The rest of the log was processed normally. To investigate, grep for non-JSON lines:
-```bash
-while IFS= read -r line; do echo "$line" | jq . >/dev/null 2>&1 || echo "BAD: $line"; done \
-  < ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl
-```
+**Dashboard shows `⚠ dropped=N` in the header** — the reducer skipped N malformed lines in `events.jsonl` (truncated writes, disk-full mid-append, manual edits). The rest of the log was processed normally. Reducer output for inspection: `cc-cockpit-reduce < ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl`.
 
 ---
 
@@ -330,24 +329,28 @@ Most are on the v1.1/v1.5 roadmap.
 <this repo>/
 ├── README.md
 ├── LICENSE
-├── install                          ← one-time installer wrapper
-└── .cc-cockpit/
-    ├── bin/cc-cockpit                 ← the binary (bash, single file)
-    ├── reduce-state.sh                ← pure-jq reducer, events.jsonl → current.json
-    ├── render.sh                      ← current.json → terminal frame
-    ├── dashboard.sh                   ← render loop + bell + alt-screen flicker-free
-    ├── layouts/initial.kdl            ← Zellij layout (dashboard | control over session panes)
-    └── examples/
-        ├── workspace.example.json     ← minimal workspace config
-        └── settings.snippet.json      ← hook registration for ~/.claude/settings.json
+├── go.mod / go.sum
+├── cmd/
+│   ├── cc-cockpit/                    ← the main binary (single static Go executable)
+│   └── cc-cockpit-reduce/             ← reducer-as-binary (events.jsonl → current.json)
+├── internal/
+│   ├── state/                         ← Event/Session types, reducer, flock-backed Append
+│   ├── workspace/                     ← workspace.json parsing, slug, repo discovery
+│   ├── hook/                          ← hook event-builder (pure)
+│   ├── dashboard/                     ← render loop + bell + frame renderer
+│   └── install/                       ← Claude settings.json hook merge
+└── test/
+    └── smoke.sh                       ← invariant-guarding end-to-end tests
 
 $XDG_STATE_HOME/cc-cockpit/<name>/     ← runtime state (never committed)
 ├── events.jsonl                       ← append-only event log
-├── events.snapshot.jsonl              ← dashboard-local copy (under flock -s)
 ├── current.json                       ← reducer output (+ dropped_events count)
-├── seq.counter                        ← global monotonic counter (under flock -x)
+├── seq.counter                        ← monotonic seq counter (also recovered from log on demand)
 ├── events.lock                        ← flock target
 ├── last_bell_seq                      ← dashboard's bell checkpoint (event-delta)
+├── cockpit.live.lock / .pid           ← live-instance lock (one cockpit per workspace)
+├── init.lock                          ← name-↔-canonical-root binding lock
+├── layout.kdl                         ← generated Zellij layout for this workspace
 └── workspace_root                     ← canonical workspace path this state binds to
 ```
 
@@ -356,7 +359,7 @@ $XDG_STATE_HOME/cc-cockpit/<name>/     ← runtime state (never committed)
 ## One-screen summary
 
 ```
-install once  →  ./install
+install once  →  go install … && cc-cockpit install
 workspace once  →  cc-cockpit init
 daily  →  cc-cockpit open  →  Zellij opens (dashboard | control)
          ↓
