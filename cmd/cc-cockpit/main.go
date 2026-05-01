@@ -27,7 +27,7 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/workspace"
 )
 
-const Version = "0.1.0-mvp"
+const Version = "0.2.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -191,22 +191,21 @@ func runDoctor(args []string) int {
 	}
 	issues := 0
 	ok := func(format string, args ...any) {
-		fmt.Printf("ok   "+format+"\n", args...)
+		fmt.Printf("ok: "+format+"\n", args...)
 	}
 	fail := func(format string, args ...any) {
-		fmt.Printf("fail "+format+"\n", args...)
+		fmt.Printf("fail: "+format+"\n", args...)
 		issues++
 	}
 
-	// Tool checks. jq is still required during the migration because the bash
-	// binary uses it; this check goes away in step 10 when bash is removed.
-	for _, tool := range []string{"jq", "zellij", "claude", "cc-cockpit"} {
+	// Tool checks — Go binary has no shell dependencies (no jq, no flock(1)).
+	for _, tool := range []string{"zellij", "claude", "cc-cockpit"} {
 		path, err := exec.LookPath(tool)
 		switch {
 		case err == nil:
 			ok("%s found: %s", tool, path)
 		case tool == "cc-cockpit":
-			fail("cc-cockpit not found on PATH (run ./install from the source checkout)")
+			fail("cc-cockpit not found on PATH (run 'cc-cockpit install')")
 		default:
 			fail("%s not found on PATH", tool)
 		}

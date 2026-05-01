@@ -1,8 +1,0 @@
-{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"alpha","payload":{"primary_repo":"api","task_name":"fix bug","declared_related_repos":["web"],"cwd":"/repos/api","zellij_pane_id":"%1"}}
-{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"SessionStart","session_id":"beta","payload":{"primary_repo":"web","task_name":"add tests","declared_related_repos":[],"cwd":"/repos/web","zellij_pane_id":"%2"}}
-{"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"UserPromptSubmit","session_id":"alpha","payload":{"prompt_preview":"hello"}}
-{"seq":4,"wall_clock_iso8601":"2026-04-20T15:00:03Z","event_type":"PostToolUse","session_id":"alpha","payload":{"tool_name":"Read"}}
-{"seq":5,"wall_clock_iso8601":"2026-04-20T15:00:04Z","event_type":"PermissionRequest","session_id":"beta","payload":{}}
-{"seq":6,"wall_clock_iso8601":"2026-04-20T15:00:05Z","event_type":"PostToolUse","session_id":"beta","payload":{"tool_name":"Bash"}}
-{"seq":7,"wall_clock_iso8601":"2026-04-20T15:00:06Z","event_type":"Stop","session_id":"alpha","payload":{}}
-{"seq":8,"wall_clock_iso8601":"2026-04-20T15:00:07Z","event_type":"Notification","session_id":"beta","payload":{"notification_type":"idle_prompt"}}
