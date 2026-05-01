@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
@@ -41,14 +42,43 @@ func TestRender_HeaderCounts(t *testing.T) {
 	if !strings.Contains(first, "active=3") {
 		t.Errorf("header active count: %q", first)
 	}
-	if !strings.Contains(first, "running=1 waiting=1 idle=1") {
-		t.Errorf("header per-status counts: %q", first)
+	if !strings.Contains(first, "▶1") || !strings.Contains(first, "●1") || !strings.Contains(first, "◯1") {
+		t.Errorf("header per-status glyphs: %q", first)
 	}
 	if !strings.Contains(first, "ended=1") {
 		t.Errorf("header ended: %q", first)
 	}
-	if !strings.Contains(first, "⚠ dropped=2") {
-		t.Errorf("header dropped warning: %q", first)
+	if !strings.Contains(frame, "⚠ 2 malformed events skipped") {
+		t.Errorf("dropped warning line: %q", frame)
+	}
+	if w := utf8.RuneCountInString(first); w > 60 {
+		t.Errorf("header should fit in 60 cols, got %d: %q", w, first)
+	}
+}
+
+func TestRender_AllLinesFitDashboardPaneWidth(t *testing.T) {
+	const paneWidth = 60
+	st := state.State{
+		Sessions: map[string]*state.Session{
+			"abcdef0123456": {
+				Status:               state.StatusWaitingInput,
+				StartedAt:            "2026-04-20T15:00:00Z",
+				LastActivity:         "2026-04-20T15:00:00Z",
+				PrimaryRepo:          json.RawMessage(`"infrastructure"`),
+				TaskName:             json.RawMessage(`"refactor a really long task name that exceeds the cap"`),
+				DeclaredRelatedRepos: json.RawMessage("[]"),
+				Cwd:                  json.RawMessage("null"),
+				PaneID:               json.RawMessage("null"),
+				LastPromptPreview:    json.RawMessage("null"),
+			},
+		},
+		DroppedEvents: 12345,
+	}
+	frame := Render(st, "very-long-workspace-name", time.Date(2026, 4, 20, 15, 0, 0, 0, time.UTC))
+	for i, line := range strings.Split(frame, "\n") {
+		if w := utf8.RuneCountInString(line); w > paneWidth {
+			t.Errorf("line %d (%d cols): %q", i, w, line)
+		}
 	}
 }
 

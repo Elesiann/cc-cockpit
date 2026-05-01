@@ -41,12 +41,12 @@ func renderHeader(st state.State, ws string) string {
 			ended++
 		}
 	}
-	h := fmt.Sprintf("─── cc-cockpit · %s ───  active=%d (running=%d waiting=%d idle=%d)  ended=%d",
-		ws, active, running, waiting, idle, ended)
+	h := fmt.Sprintf("── %s ──  active=%d  ▶%d ●%d ◯%d  ended=%d ──",
+		truncRunes(ws, 16), active, running, waiting, idle, ended)
 	if st.DroppedEvents > 0 {
-		h += fmt.Sprintf("  ⚠ dropped=%d", st.DroppedEvents)
+		h += fmt.Sprintf("\n⚠ %d malformed events skipped", st.DroppedEvents)
 	}
-	return h + " ───"
+	return h
 }
 
 func renderActiveTable(st state.State, now time.Time) string {
@@ -64,7 +64,7 @@ func renderActiveTable(st state.State, now time.Time) string {
 		return active[i].sess.StartedAt < active[j].sess.StartedAt
 	})
 	if len(active) == 0 {
-		return "  (no active sessions — start one: cc-cockpit start <repo> <task...>)"
+		return "  (no active sessions — cc-cockpit start <repo> <task>)"
 	}
 
 	var b strings.Builder
@@ -72,14 +72,15 @@ func renderActiveTable(st state.State, now time.Time) string {
 	fmt.Fprintln(tw, "STATUS\tSID\tREPO\tTASK\tACT")
 	for _, r := range active {
 		s := r.sess
-		task := jsonRawString(s.TaskName, "—")
-		if len(task) > 40 {
-			task = task[:40]
-		}
+		// Caps chosen so a worst-case row fits a 60-col dashboard pane after
+		// tabwriter padding: status(9) + sid(8) + repo(10) + task(22) + act(4)
+		// + 4×2 padding ≈ 61, with breathing room for typical content.
+		repo := truncRunes(jsonRawString(s.PrimaryRepo, "—"), 10)
+		task := truncRunes(jsonRawString(s.TaskName, "—"), 22)
 		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n",
-			glyph(s.Status), s.Status,
+			glyph(s.Status), shortStatus(s.Status),
 			shortSID(r.sid),
-			jsonRawString(s.PrimaryRepo, "—"),
+			repo,
 			task,
 			activitySince(s.LastActivity, now, false),
 		)
@@ -144,11 +145,27 @@ func glyph(status string) string {
 	return "?"
 }
 
-func shortSID(sid string) string {
-	if len(sid) > 8 {
-		return sid[:8]
+// shortStatus is the table-display name (waiting_input → waiting, since the
+// underscore-form spills past 60 cols once tabwriter pads the column).
+func shortStatus(s string) string {
+	if s == state.StatusWaitingInput {
+		return "waiting"
 	}
-	return sid
+	return s
+}
+
+func shortSID(sid string) string {
+	return truncRunes(sid, 8)
+}
+
+// truncRunes returns s clipped to at most n runes (so multi-byte chars don't
+// get sliced mid-codepoint).
+func truncRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // jsonRawString unwraps a json.RawMessage of either string or null. The
