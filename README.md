@@ -223,9 +223,9 @@ A Claude session opens in its own tmux window named `<repo>: <task>`. Switch bet
 - `◯ idle` — Last turn ended, no activity, no pending input.
 - `◼ ended` — Session closed (either via `/quit` or dismissed with `mark-ended`).
 
-**End a session:** `/quit` in the Claude window. Dashboard moves it to the `ended` footer. If Claude crashes without firing its own `SessionEnd`, tmux's `pane-died` hook auto-emits a synthetic one and the dashboard updates within a tick — no manual cleanup needed. (cc-cockpit installs the hook with `set-hook -g`, so it only affects its own private `-L cc-cockpit` server, never your normal tmux config.)
+**End a session:** `/quit` in the Claude window. Dashboard moves it to the `ended` footer. If Claude crashes without firing its own `SessionEnd`, tmux's `pane-exited` hook auto-emits a synthetic one and the dashboard updates within a tick — no manual cleanup needed. (cc-cockpit installs the hook with `set-hook -g`, so it only affects its own private `-L cc-cockpit` server, never your normal tmux config.)
 
-**Dismiss a stale session** (rare; only useful if both the pane-died hook and the natural SessionEnd are missed):
+**Dismiss a stale session** (rare; only useful if both the pane-exited hook and the natural SessionEnd are missed):
 ```bash
 cc-cockpit mark-ended <sid-prefix>
 # matches >1 session? --yes required:
@@ -285,7 +285,7 @@ Everything else is consequences of those five points.
 
 **"start: unknown repo 'X'"** — the label isn't in `.repos`. The error lists valid labels.
 
-**Dashboard shows ghost sessions from a previous run** — runtime state persists across detaches and restarts (by design — it's event-sourced). The pane-died hook handles the common crashed-Claude case automatically; for stranger cases use `cc-cockpit mark-ended <prefix>`.
+**Dashboard shows ghost sessions from a previous run** — runtime state persists across detaches and restarts (by design — it's event-sourced). The pane-exited hook handles the common crashed-Claude case automatically; for stranger cases use `cc-cockpit mark-ended <prefix>`.
 
 **Bell didn't fire even though I saw Claude asking for permission** — in `permission_mode: "auto"`, Claude auto-approves and the `Notification` fires transiently. The **visible status** may never enter `waiting_input` because the reducer collapses `Notification → PostToolUse` inside one 0.5s tick. The **bell still fires**, because it's driven by new event sequence numbers (any new `Notification`/`PermissionRequest` event), not by the reduced state. To sustain `waiting_input` in the dashboard, press `Shift+Tab` in the Claude pane to cycle out of auto mode.
 
@@ -367,7 +367,7 @@ daily  →  cc-cockpit open  →  tmux session attaches (dashboard | control)
          ↓
 control pane  →  cc-cockpit start X do the thing  →  new tmux window with claude
          ↓
-dashboard auto-updates, bell on waiting_input, pane-died auto-cleanup
+dashboard auto-updates, bell on waiting_input, pane-exited auto-cleanup
          ↓
 /quit each claude  (or close the window)
          ↓
