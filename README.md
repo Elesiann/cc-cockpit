@@ -3,7 +3,7 @@
 **A workspace supervisor for running N Claude Code sessions across M independent repos — without forcing them into a single git tree.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Status](https://img.shields.io/badge/status-v0.2.0-orange)
+![Status](https://img.shields.io/badge/status-v0.3.0-orange)
 
 ---
 
@@ -61,7 +61,7 @@ This is the differentiator. **Agent orchestrators locked to one git repo are leg
 - **`cc-cockpit start api fix auth bug`** — opens a new pane running Claude Code inside the `api` child repo, with the right env wired in.
 - **Dashboard** — auto-updates every 0.5s, shows status (`running` / `waiting_input` / `idle` / `ended`) for every session, rings the terminal bell the moment any agent enters `waiting_input`.
 
-All of this is a single Go binary driving Zellij. No daemon, no background process, no database — just an event-sourced append log per workspace and a deterministic reducer.
+All of this is a single Go binary driving tmux on its own private server. No daemon, no background process, no database — just an event-sourced append log per workspace and a deterministic reducer.
 
 ---
 
@@ -90,7 +90,7 @@ Three planes you always have in your head:
 ```
 ┌─────────── Execution plane ─────────────────┐
 │ N Claude Code sessions, each in its own     │
-│ Zellij pane, cwd = a specific child repo.   │
+│ tmux window, cwd = a specific child repo.   │
 └─────────────────────────────────────────────┘
 
 ┌─── Control plane ───┐    ┌─── Observation plane ───┐
@@ -118,7 +118,7 @@ Three planes you always have in your head:
 ## Prerequisites
 
 - Linux, macOS, or WSL2.
-- [`zellij`](https://zellij.dev/) 0.44+ on `PATH`.
+- [`tmux`](https://github.com/tmux/tmux) 3.0+ on `PATH`.
 - Claude Code 2.1+ with the hook event model (SessionStart, PostToolUse, Stop, SessionEnd, Notification, PermissionRequest, UserPromptSubmit).
 - Go 1.22+ if building from source.
 
@@ -198,7 +198,7 @@ cd ~/my-workspace
 cc-cockpit open
 ```
 
-This walks up until it finds `.cc-cockpit/workspace.json`, initializes state, and launches Zellij with two panes side-by-side:
+This walks up until it finds `.cc-cockpit/workspace.json`, initializes state, and attaches to a tmux session (creating it on first open) with two panes side-by-side in window 0:
 
 ```
 ┌─── dashboard (60 cols) ───┬─── control (bash shell) ───┐
@@ -207,12 +207,14 @@ This walks up until it finds `.cc-cockpit/workspace.json`, initializes state, an
 └───────────────────────────┴────────────────────────────┘
 ```
 
+cc-cockpit runs on its own private tmux server (`-L cc-cockpit`), so it doesn't collide with whatever tmux you already use.
+
 **Start a session** (from the control pane):
 ```bash
 cc-cockpit start api fix auth bug
 ```
 
-A Claude pane opens in a bottom row below the dashboard/control pair. Additional started sessions share that bottom row. Dashboard updates in ≤1s.
+A Claude session opens in its own tmux window named `<repo>: <task>`. Switch between them with `Ctrl-b n`/`Ctrl-b p` or `Ctrl-b <number>`. Dashboard updates in ≤1s and stays visible in window 0.
 
 **Observe:** keep an eye on `STATUS`.
 
@@ -221,9 +223,9 @@ A Claude pane opens in a bottom row below the dashboard/control pair. Additional
 - `◯ idle` — Last turn ended, no activity, no pending input.
 - `◼ ended` — Session closed (either via `/quit` or dismissed with `mark-ended`).
 
-**End a session:** `/quit` in the Claude pane. Dashboard moves it to the `ended` footer.
+**End a session:** `/quit` in the Claude window. Dashboard moves it to the `ended` footer. If Claude crashes without firing its own `SessionEnd`, tmux's `pane-died` hook auto-emits a synthetic one and the dashboard updates within a tick — no manual cleanup needed.
 
-**Dismiss a stale session** (e.g. after a crash where `SessionEnd` never fired):
+**Dismiss a stale session** (rare; only useful if both the pane-died hook and the natural SessionEnd are missed):
 ```bash
 cc-cockpit mark-ended <sid-prefix>
 # matches >1 session? --yes required:
@@ -241,26 +243,27 @@ Dismissal is non-terminal: if the matched session turns out to still be live, th
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create `.cc-cockpit/workspace.json`; with no repo specs, auto-discovers child git repos. |
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
-| `cc-cockpit start <repo> <task...>` | Open a new Zellij pane running Claude in `repos[<repo>]`. Run from inside the Zellij (control pane). |
+| `cc-cockpit start <repo> <task...>` | Open a new tmux window running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. |
 | `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **non-terminal**: if the session was actually still live, any later event from it (prompt, tool use, notification) un-dismisses it. Prefixes that match more than one session require `--yes`. |
-| `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session (e.g. after a full Zellij restart). `--yes` required because this always matches multiple sessions. |
+| `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session. `--yes` required because this always matches multiple sessions. |
 | `cc-cockpit --version` | Print version. |
 | `cc-cockpit --help` | Short usage. |
 
-**Zellij keybindings you actually need** (Default mode):
+**tmux keybindings you actually need** (default `Ctrl-b` prefix):
 
 | Keys | Does |
 |---|---|
-| `Ctrl+p` then `←↑↓→` (or `hjkl`), then `Esc` | Move focus between panes |
-| `Ctrl+p` then `x` | Close focused pane |
-| `Ctrl+o` then `d` | **Detach** Zellij (state survives, re-attach with `zellij attach`) |
-| `Ctrl+q` | Quit Zellij entirely (kills all panes — use after `mark-ended`) |
+| `Ctrl-b n` / `Ctrl-b p` | Next / previous window |
+| `Ctrl-b <N>` | Jump to window N (0 = dashboard+control) |
+| `Ctrl-b o` / `Ctrl-b ←↑↓→` | Move focus between panes inside a window |
+| `Ctrl-b &` | Kill focused window (confirm prompt) |
+| `Ctrl-b d` | **Detach** (sessions survive; re-attach with `cc-cockpit open` from the same workspace) |
 
 ---
 
 ## How it works (30-second version)
 
-1. When you `start`, `cc-cockpit` invokes `zellij action new-pane ... env COCKPIT_SESSION_ACTIVE=1 ... claude`.
+1. When you `start`, `cc-cockpit` invokes `tmux new-window -e COCKPIT_SESSION_ACTIVE=1 ... claude` on the private `-L cc-cockpit` server.
 2. The `SessionStart` hook in `~/.claude/settings.json` fires. It's a silent no-op unless `COCKPIT_SESSION_ACTIVE=1` — so global hooks don't pollute non-cockpit Claude sessions.
 3. Every event (`SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`) appends an envelope to `events.jsonl` under an exclusive `flock`. Sequence numbers are monotonic; wall-clock is advisory.
 4. The dashboard pane loops every 0.5s: snapshots the log under a shared `flock`, runs the reducer in-process to produce `current.json`, renders, and rings the bell on new `waiting_input` entrants.
@@ -278,15 +281,15 @@ Everything else is consequences of those five points.
 
 **"init: no child git repos found"** — you're outside a workspace parent, or the repos have not been cloned/symlinked yet. `cd` to the directory that contains the child repos, or run `cc-cockpit init --name <name> label=path`.
 
-**"start: must be run inside a Zellij session"** — `cc-cockpit start` only works from a pane opened by the cockpit (needs `$ZELLIJ` in env). Run `cc-cockpit open` first.
+**"start: must be run inside the cockpit"** — `cc-cockpit start` only works from a pane opened by the cockpit (needs `$COCKPIT_STATE_HOME` in env, set by the tmux session). Run `cc-cockpit open` first.
 
 **"start: unknown repo 'X'"** — the label isn't in `.repos`. The error lists valid labels.
 
-**Dashboard shows ghost sessions from a previous Zellij** — runtime state persists across Zellij restarts (by design — it's event-sourced). Use `cc-cockpit mark-ended <prefix>` to dismiss.
+**Dashboard shows ghost sessions from a previous run** — runtime state persists across detaches and restarts (by design — it's event-sourced). The pane-died hook handles the common crashed-Claude case automatically; for stranger cases use `cc-cockpit mark-ended <prefix>`.
 
 **Bell didn't fire even though I saw Claude asking for permission** — in `permission_mode: "auto"`, Claude auto-approves and the `Notification` fires transiently. The **visible status** may never enter `waiting_input` because the reducer collapses `Notification → PostToolUse` inside one 0.5s tick. The **bell still fires**, because it's driven by new event sequence numbers (any new `Notification`/`PermissionRequest` event), not by the reduced state. To sustain `waiting_input` in the dashboard, press `Shift+Tab` in the Claude pane to cycle out of auto mode.
 
-**Terminal header of Claude pane looks weird** — the start command runs `env COCKPIT_... claude`, and the terminal title shows the argv. Pane name (in the Zellij border) IS set correctly via `--name "<repo>: <task>"`; the header text inside Claude's own UI is a claude-side concern.
+**Terminal header of Claude window looks weird** — tmux window names are set correctly via `tmux new-window -n "<repo>: <task>"`; what shows up inside Claude's own UI is a claude-side concern.
 
 **Dashboard isn't updating or seems frozen** — the dashboard only repaints when the frame actually changes. If nothing is happening, it's fine. Sanity check: `ls -la ~/.local/state/cc-cockpit/<workspace>/current.json` (mtime should advance every ~0.5s).
 
@@ -310,14 +313,14 @@ cat ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl
 
 These will not work today; don't look for them:
 
-- Killing or jumping to panes from inside the dashboard (needs a Rust Zellij plugin).
+- Killing or jumping to panes from inside the dashboard (would need richer tmux integration; for now use tmux's own `Ctrl-b &`/`Ctrl-b <N>`).
 - `retask` (renaming a session's task label in-place). On the roadmap.
 - Automatic repo discovery (PreToolUse classifier, RepoDiscovered events) — on the roadmap.
 - Stale-session auto-cleanup. Use `mark-ended` for now.
 - Tracking `cwd` changes mid-session (Claude's `CwdChanged` hook didn't fire in M0 validation).
 - Desktop notifications. The terminal bell is the only audible signal.
 - Clone/bootstrap of child repos from the workspace.json.
-- Multiple Zellij sessions running the same workspace concurrently.
+- Multiple cockpits running the same workspace concurrently (live-instance lock prevents it).
 
 Most are on the v1.1/v1.5 roadmap.
 
@@ -350,7 +353,6 @@ $XDG_STATE_HOME/cc-cockpit/<name>/     ← runtime state (never committed)
 ├── last_bell_seq                      ← dashboard's bell checkpoint (event-delta)
 ├── cockpit.live.lock / .pid           ← live-instance lock (one cockpit per workspace)
 ├── init.lock                          ← name-↔-canonical-root binding lock
-├── layout.kdl                         ← generated Zellij layout for this workspace
 └── workspace_root                     ← canonical workspace path this state binds to
 ```
 
@@ -361,15 +363,15 @@ $XDG_STATE_HOME/cc-cockpit/<name>/     ← runtime state (never committed)
 ```
 install once  →  go install … && cc-cockpit install
 workspace once  →  cc-cockpit init
-daily  →  cc-cockpit open  →  Zellij opens (dashboard | control)
+daily  →  cc-cockpit open  →  tmux session attaches (dashboard | control)
          ↓
-control pane  →  cc-cockpit start X do the thing  →  new claude pane appears
+control pane  →  cc-cockpit start X do the thing  →  new tmux window with claude
          ↓
-dashboard auto-updates, bell on waiting_input
+dashboard auto-updates, bell on waiting_input, pane-died auto-cleanup
          ↓
-/quit each claude  or  cc-cockpit mark-ended all-non-ended
+/quit each claude  (or close the window)
          ↓
-Ctrl+q to close Zellij
+Ctrl-b d to detach (sessions persist) or close the last window to end
 ```
 
 ---
