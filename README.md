@@ -132,10 +132,9 @@ There are two ways to get the binary onto your `PATH`. After either one, run `cc
 # Option A — build from source (recommended for now):
 go install github.com/elesiann/cc-cockpit/cmd/cc-cockpit@latest
 
-# Option B — download a release binary (when releases are published):
-curl -L https://github.com/elesiann/cc-cockpit/releases/latest/download/cc-cockpit-linux-amd64 \
-  -o ~/.local/bin/cc-cockpit
-chmod +x ~/.local/bin/cc-cockpit
+# Option B — download a release binary (linux/amd64 — see Releases page for arm64):
+curl -L https://github.com/elesiann/cc-cockpit/releases/download/v0.3.0/cc-cockpit_0.3.0_linux_amd64.tar.gz \
+  | tar -xz -C ~/.local/bin/ cc-cockpit
 
 # Then, regardless of how you got the binary:
 cc-cockpit install
