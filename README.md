@@ -124,9 +124,9 @@ The `name` field is the runtime state directory key (must match `^[a-zA-Z0-9][a-
 └───────────────────────────┴────────────────────────────┘
 ```
 
-The dashboard is read-only and auto-updates every 0.5s. The control pane is a regular shell — that's where you run `cc-cockpit start <repo> <task>` to spawn a new Claude session in its own tmux window named `<repo>: <task>`.
+The dashboard is read-only and auto-updates every 0.5s. The control pane is a regular shell — that's where you run `cc-cockpit start <repo> <task>` to spawn a new Claude session as a pane below the dashboard. Each pane's top border shows `<repo>: <task>` so you can tell them apart at a glance.
 
-cc-cockpit uses its own private tmux server (`-L cc-cockpit`), so it never collides with any tmux config you already have. Switch between Claude windows with `Ctrl-b n` / `p` / `<number>`; detach with `Ctrl-b d` (sessions persist — `cc-cockpit open` reattaches).
+cc-cockpit uses its own private tmux server (`-L cc-cockpit`), so it never collides with any tmux config you already have. Mouse is on by default: click a pane to focus, drag a border to resize, scroll to enter copy mode. Detach with `Ctrl-b d` (sessions persist — `cc-cockpit open` reattaches).
 
 **Statuses:**
 - `▶ running` — Claude is working (assistant turn or tool execution).
@@ -153,28 +153,29 @@ Dismissal is not final. If the matched session was actually still live, its next
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create `.cc-cockpit/workspace.json`; with no repo specs, auto-discovers child git repos. |
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
-| `cc-cockpit start <repo> <task...>` | Open a new tmux window running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. |
+| `cc-cockpit start <repo> <task...>` | Open a new pane below the dashboard, running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. |
 | `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **not final**: if the session was actually still live, any later event from it (prompt, tool use, notification) brings it back. Prefixes that match more than one session require `--yes`. |
 | `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session. `--yes` required because this always matches multiple sessions. |
 | `cc-cockpit reduce` | (debug) Read `events.jsonl` on stdin, print the reduced state as JSON. Useful for inspecting how the reducer interprets a log. |
 | `cc-cockpit --version` | Print version. |
 | `cc-cockpit --help` | Short usage. |
 
-**tmux keybindings you actually need** (default `Ctrl-b` prefix):
+**tmux keybindings you actually need** (default `Ctrl-b` prefix; mouse also works):
 
 | Keys | Does |
 |---|---|
-| `Ctrl-b n` / `Ctrl-b p` | Next / previous window |
-| `Ctrl-b <N>` | Jump to window N (0 = dashboard+control) |
-| `Ctrl-b o` / `Ctrl-b ←↑↓→` | Move focus between panes inside a window |
-| `Ctrl-b &` | Kill focused window (confirm prompt) |
+| Click a pane | Focus it (mouse is on by default) |
+| `Ctrl-b o` / `Ctrl-b ←↑↓→` | Move focus between panes |
+| `Ctrl-b x` | Kill focused pane (confirm prompt) |
+| `Ctrl-b z` | Zoom focused pane to full screen; press again to restore |
+| `Ctrl-b Space` | Cycle through layout presets (rebalance pane sizes) |
 | `Ctrl-b d` | **Detach** (sessions survive; re-attach with `cc-cockpit open` from the same workspace) |
 
 ---
 
 ## How it works (30-second version)
 
-1. When you `start`, `cc-cockpit` invokes `tmux new-window -e COCKPIT_SESSION_ACTIVE=1 ... claude` on the private `-L cc-cockpit` server.
+1. When you `start`, `cc-cockpit` invokes `tmux split-window -v -f -t <session>:0 -e COCKPIT_SESSION_ACTIVE=1 ... claude` on the private `-L cc-cockpit` server, so the Claude session opens as a pane below the dashboard.
 2. The `SessionStart` hook in `~/.claude/settings.json` fires. It is a silent no-op unless `COCKPIT_SESSION_ACTIVE=1`, so cc-cockpit's hooks do not affect Claude sessions started outside the cockpit.
 3. Every event (`SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`) appends an envelope to `events.jsonl` under an exclusive `flock`. Sequence numbers are monotonic; wall-clock is advisory.
 4. The dashboard pane loops every 0.5s. It snapshots the log under a shared `flock`, runs the reducer in-process to produce `current.json`, renders the frame, and rings the bell on new `waiting_input` sessions.

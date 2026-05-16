@@ -837,7 +837,7 @@ func runSpawn(args []string) int {
 		"COCKPIT_DECLARED_RELATED_REPOS=" + related,
 		"COCKPIT_TASK_NAME=" + task,
 	}
-	if _, err := tmux.NewWindow(workspaceName, paneName, abs, windowEnv, "claude"); err != nil {
+	if _, err := tmux.NewClaudePane(workspaceName, paneName, abs, windowEnv, "claude"); err != nil {
 		die(cmdName, "%v", err)
 	}
 	return 0
