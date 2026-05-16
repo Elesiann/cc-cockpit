@@ -216,71 +216,9 @@ cat ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl
 
 ---
 
-## What's intentionally NOT here (v1 non-goals)
-
-These will not work today; don't look for them:
-
-- Killing or jumping to panes from inside the dashboard (would need richer tmux integration; for now use tmux's own `Ctrl-b &`/`Ctrl-b <N>`).
-- `retask` (renaming a session's task label in-place). On the roadmap.
-- Automatic repo discovery (PreToolUse classifier, RepoDiscovered events) — on the roadmap.
-- Tracking `cwd` changes mid-session (Claude's `CwdChanged` hook didn't fire in M0 validation).
-- Desktop notifications. The terminal bell is the only audible signal.
-- Clone/bootstrap of child repos from the workspace.json.
-- Multiple cockpits running the same workspace concurrently (live-instance lock prevents it).
-
-Most are on the v1.1/v1.5 roadmap.
-
----
-
-## Source layout
-
-```
-<this repo>/
-├── README.md
-├── LICENSE
-├── go.mod / go.sum
-├── cmd/
-│   └── cc-cockpit/                    ← the main binary (single static Go executable)
-├── internal/
-│   ├── state/                         ← Event/Session types, reducer, flock-backed Append
-│   ├── workspace/                     ← workspace.json parsing, slug, repo discovery
-│   ├── hook/                          ← hook event-builder (pure)
-│   ├── dashboard/                     ← render loop + bell + frame renderer
-│   ├── tmux/                          ← tmux server / session / window wrapper
-│   └── install/                       ← Claude settings.json hook merge
-└── test/
-    └── smoke.sh                       ← invariant-guarding end-to-end tests
-
-$XDG_STATE_HOME/cc-cockpit/<name>/     ← runtime state (never committed)
-├── events.jsonl                       ← append-only event log
-├── current.json                       ← reducer output (+ dropped_events count)
-├── seq.counter                        ← monotonic seq counter (also recovered from log on demand)
-├── events.lock                        ← flock target
-├── last_bell_seq                      ← dashboard's bell checkpoint (event-delta)
-├── cockpit.live.lock / .pid           ← live-instance lock (one cockpit per workspace)
-├── init.lock                          ← name-↔-canonical-root binding lock
-└── workspace_root                     ← canonical workspace path this state binds to
-```
-
----
-
-## Development
-
-```bash
-git clone https://github.com/Elesiann/cc-cockpit
-cd cc-cockpit
-go build ./cmd/cc-cockpit
-go test -race ./...
-bash test/smoke.sh   # needs tmux + jq on PATH
-```
-
-CI runs the same checks (gofmt, vet, build, race-tested unit tests, smoke) on every PR. A `v*` tag pushed to `main` triggers the release workflow, which uses goreleaser to publish `linux/{amd64,arm64}` tarballs plus checksums to the [Releases page](https://github.com/Elesiann/cc-cockpit/releases).
-
----
-
 ## Contributing
 
-Early-stage, single-author project. If you try it and it breaks, open an issue with the event log (`events.jsonl`) attached. If you want a feature listed in the non-goals section above, PRs welcome — open a discussion issue first so we can align on scope.
+Early-stage, single-author project. If you try it and it breaks, open an issue with the event log (`events.jsonl`) attached. PRs welcome — open a discussion issue first so we can align on scope.
 
 ---
 
