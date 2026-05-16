@@ -30,14 +30,29 @@ func TestSplitControlArgs(t *testing.T) {
 	}
 }
 
-func TestNewWindowArgs(t *testing.T) {
-	got := newWindowArgs("ws", "api: fix bug", "/repos/api",
+func TestServerOptionArgs(t *testing.T) {
+	got := serverOptionArgs()
+	want := [][]string{
+		{"set-option", "-g", "mouse", "on"},
+		{"set-option", "-g", "pane-border-status", "top"},
+		{"set-option", "-g", "pane-border-format", " #{pane_title} "},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v\nwant %v", got, want)
+	}
+}
+
+func TestSpawnPaneArgs_FirstSpawn(t *testing.T) {
+	// 2 existing panes (dashboard + control) → full-width bottom row.
+	got := spawnPaneArgs(
+		"ws",
+		"/repos/api",
 		[]string{"COCKPIT_TASK_NAME=fix bug", "COCKPIT_PRIMARY_REPO=api"},
-		[]string{"claude"})
+		[]string{"%0", "%1"},
+		[]string{"claude"},
+	)
 	want := []string{
-		"new-window", "-d",
-		"-t", "ws",
-		"-n", "api: fix bug",
+		"split-window", "-v", "-f", "-t", "ws:0",
 		"-c", "/repos/api",
 		"-P", "-F", "#{pane_id}",
 		"-e", "COCKPIT_TASK_NAME=fix bug",
@@ -49,17 +64,31 @@ func TestNewWindowArgs(t *testing.T) {
 	}
 }
 
-func TestNewWindowArgs_NoEnv(t *testing.T) {
-	got := newWindowArgs("ws", "name", "/cwd", nil, []string{"claude"})
+func TestSpawnPaneArgs_SubsequentSpawn(t *testing.T) {
+	// 3 existing panes (dashboard + control + one claude) → split last horizontally.
+	got := spawnPaneArgs(
+		"ws",
+		"/repos/web",
+		nil,
+		[]string{"%0", "%1", "%5"},
+		[]string{"claude"},
+	)
 	want := []string{
-		"new-window", "-d",
-		"-t", "ws",
-		"-n", "name",
-		"-c", "/cwd",
+		"split-window", "-h", "-t", "%5",
+		"-c", "/repos/web",
 		"-P", "-F", "#{pane_id}",
 		"claude",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)
+	}
+}
+
+func TestSpawnPaneArgs_TargetsMostRecentPane(t *testing.T) {
+	// 4 panes — split target must be the LAST entry, not any earlier claude pane.
+	got := spawnPaneArgs("ws", "/cwd", nil, []string{"%0", "%1", "%2", "%7"}, []string{"claude"})
+	// The "-t" value sits immediately after "split-window -h".
+	if len(got) < 4 || got[0] != "split-window" || got[1] != "-h" || got[2] != "-t" || got[3] != "%7" {
+		t.Errorf("expected split-window -h -t %%7 prefix; got %v", got)
 	}
 }

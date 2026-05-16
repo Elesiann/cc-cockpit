@@ -37,6 +37,20 @@ func NewSession(name string, env []string) error {
 	if err := cmd("resize-pane", "-t", name+":0.0", "-x", "60").Run(); err != nil {
 		return fmt.Errorf("resize-pane: %w", err)
 	}
+	return applyServerOptions()
+}
+
+// applyServerOptions sets server-global tmux options on the private
+// cc-cockpit server: mouse on (click panes to focus, drag to resize,
+// wheel to enter copy-mode), and pane-border-status/format so each
+// Claude pane self-labels with its title (set via select-pane -T).
+// Global is safe because the -L cc-cockpit server is dedicated.
+func applyServerOptions() error {
+	for _, args := range serverOptionArgs() {
+		if err := cmd(args...).Run(); err != nil {
+			return fmt.Errorf("set-option %v: %w", args, err)
+		}
+	}
 	return nil
 }
 
@@ -50,14 +64,49 @@ func Attach(name string) error {
 	return c.Run()
 }
 
-// NewWindow opens a window in the session running command in cwd. Returns
-// the new pane's id (e.g. "%42") captured from -P -F '#{pane_id}'.
-func NewWindow(session, windowName, cwd string, env []string, command ...string) (string, error) {
-	out, err := cmd(newWindowArgs(session, windowName, cwd, env, command)...).Output()
+// NewClaudePane spawns a Claude session as a pane inside window 0 of the
+// cockpit session, recreating the original bash+Zellij layout:
+//
+//	┌─ dashboard ─┬─ control ──┐
+//	├─────────────┴────────────┤
+//	│ claude 1 │ claude 2 │ …  │
+//	└──────────────────────────┘
+//
+// First spawn (window 0 has only dashboard + control) creates a full-width
+// pane on the bottom row via split-window -v -f. Subsequent spawns target
+// the most-recent Claude pane and split it horizontally so panes tile
+// side-by-side in the bottom row. After creation, the pane's title is set
+// to paneName so it renders in the pane border.
+//
+// Returns the new pane's id (e.g. "%42") captured from -P -F '#{pane_id}'.
+func NewClaudePane(session, paneName, cwd string, env []string, command ...string) (string, error) {
+	existing, err := listPaneIDs(session, 0)
 	if err != nil {
-		return "", fmt.Errorf("new-window: %w", err)
+		return "", fmt.Errorf("list-panes: %w", err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	out, err := cmd(spawnPaneArgs(session, cwd, env, existing, command)...).Output()
+	if err != nil {
+		return "", fmt.Errorf("split-window: %w", err)
+	}
+	paneID := strings.TrimSpace(string(out))
+	if err := cmd("select-pane", "-t", paneID, "-T", paneName).Run(); err != nil {
+		return paneID, fmt.Errorf("select-pane -T: %w", err)
+	}
+	return paneID, nil
+}
+
+func listPaneIDs(session string, windowIdx int) ([]string, error) {
+	out, err := cmd("list-panes", "-t", fmt.Sprintf("%s:%d", session, windowIdx), "-F", "#{pane_id}").Output()
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			ids = append(ids, line)
+		}
+	}
+	return ids, nil
 }
 
 // SetPaneExitedHook installs shellCmd as the pane-exited hook for one tmux
@@ -102,14 +151,33 @@ func splitControlArgs(name string, env []string) []string {
 	return append(args, "bash")
 }
 
-func newWindowArgs(session, windowName, cwd string, env []string, command []string) []string {
-	args := []string{
-		"new-window", "-d",
-		"-t", session,
-		"-n", windowName,
-		"-c", cwd,
-		"-P", "-F", "#{pane_id}",
+// serverOptionArgs returns the tmux set-option invocations applied by
+// applyServerOptions. Split out so tests can validate the option set.
+func serverOptionArgs() [][]string {
+	return [][]string{
+		{"set-option", "-g", "mouse", "on"},
+		{"set-option", "-g", "pane-border-status", "top"},
+		{"set-option", "-g", "pane-border-format", " #{pane_title} "},
 	}
+}
+
+// spawnPaneArgs returns the tmux split-window args for adding a Claude
+// pane to window 0. existingPaneIDs is the output of list-panes for that
+// window. With 2 panes (the cockpit's dashboard + control) the new pane
+// is a full-width row across the bottom (-v -f). With 3 or more, the
+// previous Claude pane is split horizontally (-h) so panes tile
+// side-by-side. The new pane's id is captured via -P -F.
+func spawnPaneArgs(session, cwd string, env []string, existingPaneIDs []string, command []string) []string {
+	var args []string
+	if len(existingPaneIDs) <= 2 {
+		// First spawn: full-width bottom row.
+		args = []string{"split-window", "-v", "-f", "-t", session + ":0"}
+	} else {
+		// Subsequent spawn: tile next to the most-recent pane.
+		last := existingPaneIDs[len(existingPaneIDs)-1]
+		args = []string{"split-window", "-h", "-t", last}
+	}
+	args = append(args, "-c", cwd, "-P", "-F", "#{pane_id}")
 	for _, kv := range env {
 		args = append(args, "-e", kv)
 	}

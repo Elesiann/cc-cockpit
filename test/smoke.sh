@@ -280,10 +280,18 @@ echo "$out" | grep -q 'not a git repo' && pass 'non-git dir rejected' || fail "n
 
 FAKE_BIN="$SANDBOX/fake-bin"
 mkdir -p "$FAKE_BIN"
+# Fake tmux: log every argv to tmux-spawn.args (append, since NewClaudePane
+# calls list-panes → split-window → select-pane in sequence). list-panes
+# returns 2 ids (dashboard + control) so the spawn takes the first-pane
+# branch. split-window prints the new pane id.
 cat > "$FAKE_BIN/tmux" <<EOF
 #!/bin/bash
-printf '%s\n' "\$@" > "$SANDBOX/tmux-spawn.args"
-echo "%42"
+printf '%s\n' "\$@" >> "$SANDBOX/tmux-spawn.args"
+case "\$3" in
+  list-panes) printf '%%0\n%%1\n' ;;
+  split-window) echo "%42" ;;
+esac
+exit 0
 EOF
 cat > "$FAKE_BIN/claude" <<'EOF'
 #!/bin/bash
@@ -292,13 +300,16 @@ EOF
 chmod +x "$FAKE_BIN/tmux" "$FAKE_BIN/claude"
 OLD_PATH="$PATH"
 export PATH="$FAKE_BIN:$PATH"
+: > "$SANDBOX/tmux-spawn.args"
 out="$("$BIN" spawn --repo good --task "layout test" 2>&1)"
 rc=$?
 export PATH="$OLD_PATH"
 if [ "$rc" -eq 0 ] \
-   && grep -qx -- 'new-window' "$SANDBOX/tmux-spawn.args" \
+   && grep -qx -- 'split-window' "$SANDBOX/tmux-spawn.args" \
+   && grep -qx -- '-v' "$SANDBOX/tmux-spawn.args" \
+   && grep -qx -- '-f' "$SANDBOX/tmux-spawn.args" \
    && grep -qx -- '-c' "$SANDBOX/tmux-spawn.args"; then
-  pass 'spawn launches tmux new-window'
+  pass 'spawn launches tmux split-window -v -f (full-width bottom pane)'
 else
   fail "spawn failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
 fi
