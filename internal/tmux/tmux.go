@@ -37,6 +37,16 @@ func NewSession(name string, env []string) error {
 	if err := cmd("resize-pane", "-t", name+":0.0", "-x", "60").Run(); err != nil {
 		return fmt.Errorf("resize-pane: %w", err)
 	}
+	// Label the cockpit panes so the border title isn't the bash fallback
+	// (hostname). "watcher" = read-only dashboard, "control" = shell where
+	// you spawn new sessions. Claude panes get their own title later via
+	// NewClaudePane.
+	if err := cmd("select-pane", "-t", name+":0.0", "-T", "watcher").Run(); err != nil {
+		return fmt.Errorf("select-pane -T watcher: %w", err)
+	}
+	if err := cmd("select-pane", "-t", name+":0.1", "-T", "control").Run(); err != nil {
+		return fmt.Errorf("select-pane -T control: %w", err)
+	}
 	return applyServerOptions()
 }
 
