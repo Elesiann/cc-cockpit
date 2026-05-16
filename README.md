@@ -11,26 +11,18 @@
 ## Quickstart
 
 ```bash
-# one time: build & install the binary plus the Claude Code hooks
 go install github.com/elesiann/cc-cockpit/cmd/cc-cockpit@latest
-cc-cockpit install
-
-# one time, from the directory that contains your child git repos
-cd ~/my-workspace
-cc-cockpit init
-cc-cockpit doctor
-
-# daily
+cd ~/wherever-your-repos-are
 cc-cockpit open
 ```
 
-Inside the cockpit control pane:
+`open` discovers child git repos in the current directory, installs the Claude Code hooks on first run, and attaches a tmux session with a live dashboard. From the control pane, spawn a Claude session in a specific repo:
 
 ```bash
 cc-cockpit start api fix auth bug
 ```
 
-Command words are literal: `install` sets up your machine, `init` creates workspace config, `open` opens the cockpit, and `start` starts a session.
+That's it — no separate `install`, `init`, or `doctor` step required (they still exist for scripts and customization).
 
 ---
 
@@ -54,18 +46,6 @@ This is the differentiator. **Agent orchestrators locked to one git repo are leg
 
 ---
 
-## What it does
-
-- **`cc-cockpit install`** — installs the `cc-cockpit` command on `PATH` and wires the Claude Code hooks.
-- **`cc-cockpit init`** — creates `.cc-cockpit/workspace.json` from the child git repos in a workspace directory.
-- **`cc-cockpit open`** — opens the cockpit for that workspace.
-- **`cc-cockpit start api fix auth bug`** — opens a new pane running Claude Code inside the `api` child repo, with the right env wired in.
-- **Dashboard** — auto-updates every 0.5s, shows status (`running` / `waiting_input` / `idle` / `ended`) for every session, rings the terminal bell the moment any agent enters `waiting_input`.
-
-All of this is a single Go binary driving tmux on its own private server. No daemon, no background process, no database — just an event-sourced append log per workspace and a deterministic reducer.
-
----
-
 ## Screenshot
 
 ```
@@ -81,38 +61,6 @@ All of this is a single Go binary driving tmux on its own private server. No dae
 ```
 
 (Actual renders include task labels, activity timers, and an `ended` footer.)
-
----
-
-## Mental model
-
-Three planes you always have in your head:
-
-```
-┌─────────── Execution plane ─────────────────┐
-│ N Claude Code sessions, each in its own     │
-│ tmux window, cwd = a specific child repo.   │
-└─────────────────────────────────────────────┘
-
-┌─── Control plane ───┐    ┌─── Observation plane ───┐
-│ cc-cockpit CLI      │    │ dashboard pane          │
-│   open / start /    │    │ (read-only view of      │
-│   doctor / mark-end │    │  sessions + bell on     │
-│                     │    │  waiting_input)         │
-└─────────────────────┘    └─────────────────────────┘
-```
-
-**Non-negotiable principle**: the cockpit **observes** agents — it never orchestrates them. The operator is always in the loop. This is a deliberate choice, not a limitation.
-
-**Key concepts:**
-
-| Concept | Where it lives |
-|---|---|
-| Workspace parent | Any directory with `.cc-cockpit/workspace.json` (doesn't need to be a git repo) |
-| Child repo | An independent git repo inside the workspace parent. Sessions only run inside a child, never the parent. |
-| Binary | A single static Go binary on `PATH` (typically `~/.local/bin/cc-cockpit`) — no sibling files needed |
-| Runtime state | `$XDG_STATE_HOME/cc-cockpit/<workspace-name>/` — `events.jsonl`, `current.json`, `events.lock` |
-| Hooks | Global `~/.claude/settings.json` — absolute path to the binary; silent no-op unless `COCKPIT_SESSION_ACTIVE=1` is in the env |
 
 ---
 
@@ -149,56 +97,21 @@ The `Notification` hook uses `matcher: "idle_prompt|permission_prompt"` — this
 
 ---
 
-## Create a workspace
+## Workspaces
 
-```bash
-# Put, symlink, or clone the real git repos below a workspace parent.
-# The parent directory does NOT need to be a git repo itself.
-mkdir -p ~/my-workspace
-cd ~/my-workspace
+A workspace is just a directory with `.cc-cockpit/workspace.json`. `cc-cockpit open` creates this automatically when missing, discovering child git repos at depths 1–3 and registering each as a session target.
 
-# Example shape before init:
-#   ~/my-workspace/api/.git
-#   ~/my-workspace/web/.git
-#   ~/my-workspace/infra/.git
-#
-# Initialize the workspace config.
-cc-cockpit init
-```
-
-Then open the cockpit:
-
-```bash
-cc-cockpit open
-```
-
-For an explicit layout, initialize once before opening:
+For explicit setup (custom labels, scripted bootstrap, no-discovery), use `cc-cockpit init`:
 
 ```bash
 cc-cockpit init --name my-workspace api=packages/api web=packages/web infra=infra
-cc-cockpit open
 ```
 
-**Rules about `workspace.json`:**
-
-- `name` is the runtime state dir key. It must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` (no slashes, no `..`). Pick something stable — renaming it orphans the previous state.
-- If two different workspace directories declare the same `name`, the second `cc-cockpit open` fails with a clear error. State binds to the **canonical path** of the workspace root on first open and rejects mismatches on subsequent opens. No silent cross-workspace contamination.
-- Keys in `repos` are **short labels** you type in `cc-cockpit start <repo> ...` (`api`, `web`, ...), not filesystem paths.
-- Values are **relative paths** from the workspace parent to each child repo. Paths that resolve outside the workspace root (e.g. `../sibling`) are rejected at `start` time.
-- Children must be **real git repos** — `start` verifies `git -C <child> rev-parse --git-dir` and refuses to start Claude anywhere else.
-- You can have multiple workspaces with different `name`s; they don't conflict.
+The `name` field is the runtime state directory key (must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`). State binds to the canonical path of the workspace root on first open and rejects mismatches on subsequent opens — no silent cross-workspace contamination.
 
 ---
 
-## Daily workflow
-
-```bash
-# enter the workspace parent, or any dir inside it, and open the cockpit
-cd ~/my-workspace
-cc-cockpit open
-```
-
-This walks up until it finds `.cc-cockpit/workspace.json`, initializes state, and attaches to a tmux session (creating it on first open) with two panes side-by-side in window 0:
+## Inside the cockpit
 
 ```
 ┌─── dashboard (60 cols) ───┬─── control (bash shell) ───┐
@@ -207,31 +120,24 @@ This walks up until it finds `.cc-cockpit/workspace.json`, initializes state, an
 └───────────────────────────┴────────────────────────────┘
 ```
 
-cc-cockpit runs on its own private tmux server (`-L cc-cockpit`), so it doesn't collide with whatever tmux you already use.
+The dashboard is read-only and auto-updates every 0.5s. The control pane is a regular shell — that's where you run `cc-cockpit start <repo> <task>` to spawn a new Claude session in its own tmux window named `<repo>: <task>`.
 
-**Start a session** (from the control pane):
+cc-cockpit uses its own private tmux server (`-L cc-cockpit`), so it never collides with any tmux config you already have. Switch between Claude windows with `Ctrl-b n` / `p` / `<number>`; detach with `Ctrl-b d` (sessions persist — `cc-cockpit open` reattaches).
+
+**Statuses:**
+- `▶ running` — Claude is working (assistant turn or tool execution).
+- `● waiting_input` — parked waiting on you. Terminal bell fires on entry.
+- `◯ idle` — last turn ended; no pending input.
+- `◼ ended` — closed via `/quit`, or auto-cleaned after a crash.
+
+**End a session:** `/quit` in the Claude window. If Claude crashes without firing `SessionEnd`, the per-session `tmux pane-exited` hook auto-emits a synthetic one — no manual cleanup. For the rare case where neither fires:
+
 ```bash
-cc-cockpit start api fix auth bug
+cc-cockpit mark-ended <sid-prefix>           # one session
+cc-cockpit mark-ended all-non-ended --yes    # all of them
 ```
 
-A Claude session opens in its own tmux window named `<repo>: <task>`. Switch between them with `Ctrl-b n`/`Ctrl-b p` or `Ctrl-b <number>`. Dashboard updates in ≤1s and stays visible in window 0.
-
-**Observe:** keep an eye on `STATUS`.
-
-- `▶ running` — Claude is working (assistant turn in progress, or tool executing).
-- `● waiting_input` — Claude is parked waiting on you. Terminal bell fires on transition into this state (once per entry; re-armed after it exits).
-- `◯ idle` — Last turn ended, no activity, no pending input.
-- `◼ ended` — Session closed (either via `/quit` or dismissed with `mark-ended`).
-
-**End a session:** `/quit` in the Claude window. Dashboard moves it to the `ended` footer. If Claude crashes without firing its own `SessionEnd`, tmux's `pane-exited` hook auto-emits a synthetic one and the dashboard updates within a tick — no manual cleanup needed. The hook is installed per-session (`tmux set-hook -t <session>`) on cc-cockpit's private `-L cc-cockpit` server, so it never touches your normal tmux config and multiple cockpits don't stomp each other's cleanup.
-
-**Dismiss a stale session** (rare; only useful if both the pane-exited hook and the natural SessionEnd are missed):
-```bash
-cc-cockpit mark-ended <sid-prefix>
-# matches >1 session? --yes required:
-cc-cockpit mark-ended all-non-ended --yes
-```
-Dismissal is non-terminal: if the matched session turns out to still be live, the next event it emits will un-dismiss it and it reappears in the active table.
+Dismissal is non-terminal: if the matched session was actually still live, its next event un-dismisses it.
 
 ---
 
@@ -354,24 +260,6 @@ $XDG_STATE_HOME/cc-cockpit/<name>/     ← runtime state (never committed)
 ├── cockpit.live.lock / .pid           ← live-instance lock (one cockpit per workspace)
 ├── init.lock                          ← name-↔-canonical-root binding lock
 └── workspace_root                     ← canonical workspace path this state binds to
-```
-
----
-
-## One-screen summary
-
-```
-install once  →  go install … && cc-cockpit install
-workspace once  →  cc-cockpit init
-daily  →  cc-cockpit open  →  tmux session attaches (dashboard | control)
-         ↓
-control pane  →  cc-cockpit start X do the thing  →  new tmux window with claude
-         ↓
-dashboard auto-updates, bell on waiting_input, pane-exited auto-cleanup
-         ↓
-/quit each claude  (or close the window)
-         ↓
-Ctrl-b d to detach (sessions persist) or close the last window to end
 ```
 
 ---
