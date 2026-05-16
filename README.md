@@ -1,6 +1,6 @@
 # cc-cockpit
 
-**Run many Claude Code sessions across separate repos — without forcing them into one git tree.**
+**An attention layer for parallel coding agents. One screen to watch every session you've started — across any repos, with any agent tool inside.**
 
 [![CI](https://github.com/Elesiann/cc-cockpit/actions/workflows/ci.yml/badge.svg)](https://github.com/Elesiann/cc-cockpit/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Elesiann/cc-cockpit)](https://github.com/Elesiann/cc-cockpit/releases/latest)
@@ -31,21 +31,22 @@ That's it — no separate `install`, `init`, or `doctor` step needed. The three 
 
 ## Why this exists
 
-Claude Code made it cheap to start many agents at once. The bottleneck moved from **compute** to **attention** — many sessions running at the same time demand many contexts in your head. Tools that answer this all make the same assumption:
+Claude Code made it cheap to start many agents at once. The bottleneck moved from **compute** to **attention** — many sessions running at the same time demand many contexts in your head.
 
-> *"Your agents work on the same codebase."*
+Most tools answer this at the **agent layer**: they dispatch agents, isolate file edits with git worktrees, manage branches, even open pull requests. That's the layer where files get written.
 
-Monorepo tools, devcontainer runners, IDE multi-agent plugins, git-worktree runners — they all expect one repository. The workspace **is** the repo. Starting an agent in a sibling repo means a second instance, a second config, a second mental model.
+cc-cockpit lives one layer above. It does not dispatch agents. It does not isolate files. It does not touch your repos. It just watches every terminal, builds a live status table, and rings the bell when one of them needs you. **Whatever runs inside each pane is your choice** — vanilla `claude`, a managed-agent fleet, a worktree orchestrator, or even a non-Claude tool that emits the same hook events.
 
-**That's not how real work is structured.** A feature lives across `customer-portal`, `instance-manager`, and `supabase-bootstrap` — three separate repos with their own CI, their own remote, and their own release schedule. A "workspace" is a **mental unit**, not a git unit.
+The result: **one screen to watch them all**, no matter how many repos they span or which tools you use inside them.
 
-cc-cockpit treats it that way:
+### Principles
 
-- The workspace parent is just a **directory**. Not a super-repo. Not a monorepo. Not a git worktree.
-- Each child is a first-class git repo — its own `.git/`, its own remote, its own history.
-- The cockpit watches sessions across all of them, in one place, with one bell.
+- **Observation, not orchestration.** cc-cockpit reads hook events; it never dispatches and never writes code.
+- **Your repos stay untouched.** Sessions run in your real working directories. No `.claude/worktrees/`, no auto-branches, nothing to clean up.
+- **No daemon.** Just tmux, `flock`, and an append-only event log per workspace.
+- **Composable.** Run any agent tool inside the panes cc-cockpit watches. cc-cockpit only cares that hook events show up in the log.
 
-This is what makes it different. **Most tools force your agents into one git repo. cc-cockpit does not. As far as we know, it's the only one that does not.**
+cc-cockpit is the missing **attention layer** between you and N parallel terminals. Nothing more, nothing less.
 
 ---
 
