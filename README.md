@@ -2,8 +2,9 @@
 
 **A workspace supervisor for running N Claude Code sessions across M independent repos — without forcing them into a single git tree.**
 
+[![CI](https://github.com/Elesiann/cc-cockpit/actions/workflows/ci.yml/badge.svg)](https://github.com/Elesiann/cc-cockpit/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Elesiann/cc-cockpit)](https://github.com/Elesiann/cc-cockpit/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![Status](https://img.shields.io/badge/status-v0.3.0-orange)
 
 ---
 
@@ -222,7 +223,7 @@ A Claude session opens in its own tmux window named `<repo>: <task>`. Switch bet
 - `◯ idle` — Last turn ended, no activity, no pending input.
 - `◼ ended` — Session closed (either via `/quit` or dismissed with `mark-ended`).
 
-**End a session:** `/quit` in the Claude window. Dashboard moves it to the `ended` footer. If Claude crashes without firing its own `SessionEnd`, tmux's `pane-exited` hook auto-emits a synthetic one and the dashboard updates within a tick — no manual cleanup needed. (cc-cockpit installs the hook with `set-hook -g`, so it only affects its own private `-L cc-cockpit` server, never your normal tmux config.)
+**End a session:** `/quit` in the Claude window. Dashboard moves it to the `ended` footer. If Claude crashes without firing its own `SessionEnd`, tmux's `pane-exited` hook auto-emits a synthetic one and the dashboard updates within a tick — no manual cleanup needed. The hook is installed per-session (`tmux set-hook -t <session>`) on cc-cockpit's private `-L cc-cockpit` server, so it never touches your normal tmux config and multiple cockpits don't stomp each other's cleanup.
 
 **Dismiss a stale session** (rare; only useful if both the pane-exited hook and the natural SessionEnd are missed):
 ```bash
@@ -245,6 +246,7 @@ Dismissal is non-terminal: if the matched session turns out to still be live, th
 | `cc-cockpit start <repo> <task...>` | Open a new tmux window running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. |
 | `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **non-terminal**: if the session was actually still live, any later event from it (prompt, tool use, notification) un-dismisses it. Prefixes that match more than one session require `--yes`. |
 | `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session. `--yes` required because this always matches multiple sessions. |
+| `cc-cockpit reduce` | (debug) Read `events.jsonl` on stdin, print the reduced state as JSON. Useful for inspecting how the reducer interprets a log. |
 | `cc-cockpit --version` | Print version. |
 | `cc-cockpit --help` | Short usage. |
 
@@ -315,7 +317,6 @@ These will not work today; don't look for them:
 - Killing or jumping to panes from inside the dashboard (would need richer tmux integration; for now use tmux's own `Ctrl-b &`/`Ctrl-b <N>`).
 - `retask` (renaming a session's task label in-place). On the roadmap.
 - Automatic repo discovery (PreToolUse classifier, RepoDiscovered events) — on the roadmap.
-- Stale-session auto-cleanup. Use `mark-ended` for now.
 - Tracking `cwd` changes mid-session (Claude's `CwdChanged` hook didn't fire in M0 validation).
 - Desktop notifications. The terminal bell is the only audible signal.
 - Clone/bootstrap of child repos from the workspace.json.
@@ -372,6 +373,20 @@ dashboard auto-updates, bell on waiting_input, pane-exited auto-cleanup
          ↓
 Ctrl-b d to detach (sessions persist) or close the last window to end
 ```
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/Elesiann/cc-cockpit
+cd cc-cockpit
+go build ./cmd/cc-cockpit
+go test -race ./...
+bash test/smoke.sh   # needs tmux + jq on PATH
+```
+
+CI runs the same checks (gofmt, vet, build, race-tested unit tests, smoke) on every PR. A `v*` tag pushed to `main` triggers the release workflow, which uses goreleaser to publish `linux/{amd64,arm64}` tarballs plus checksums to the [Releases page](https://github.com/Elesiann/cc-cockpit/releases).
 
 ---
 
