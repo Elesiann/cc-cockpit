@@ -1,6 +1,6 @@
 # cc-cockpit
 
-**A workspace supervisor for running N Claude Code sessions across M independent repos — without forcing them into a single git tree.**
+**Run many Claude Code sessions across separate repos — without forcing them into one git tree.**
 
 [![CI](https://github.com/Elesiann/cc-cockpit/actions/workflows/ci.yml/badge.svg)](https://github.com/Elesiann/cc-cockpit/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Elesiann/cc-cockpit)](https://github.com/Elesiann/cc-cockpit/releases/latest)
@@ -22,27 +22,30 @@ cc-cockpit open
 cc-cockpit start api fix auth bug
 ```
 
-That's it — no separate `install`, `init`, or `doctor` step required (they still exist for scripts and customization).
+That's it — no separate `install`, `init`, or `doctor` step needed. The three commands still exist for scripts and custom setups.
+
+> [!NOTE]
+> On first run, `cc-cockpit open` edits `~/.claude/settings.json` to register the Claude Code hooks. The original file is backed up as `settings.json.bak-<timestamp>` if it would change.
 
 ---
 
 ## Why this exists
 
-Claude Code made it cheap to spin up many agents in parallel. The bottleneck moved from **compute** to **attention** — N sessions running simultaneously demand N contexts in an operator's head. Existing agent orchestrators answer this, but they all make the same assumption:
+Claude Code made it cheap to start many agents at once. The bottleneck moved from **compute** to **attention** — many sessions running at the same time demand many contexts in your head. Tools that answer this all make the same assumption:
 
-> *"Your N agents work on the same codebase."*
+> *"Your agents work on the same codebase."*
 
-Monorepo tools, devcontainer runners, IDE multi-agent plugins, Git-worktree orchestrators — they all expect one repository. The workspace **is** the repo. Launching an agent in an unrelated sibling repo means a second instance, a second config, a second mental model.
+Monorepo tools, devcontainer runners, IDE multi-agent plugins, git-worktree runners — they all expect one repository. The workspace **is** the repo. Starting an agent in a sibling repo means a second instance, a second config, a second mental model.
 
-**That's not how real work is structured.** A feature lives across `customer-portal`, `instance-manager`, and `supabase-bootstrap` — three independently-versioned repos with their own CI, their own remote, their own release cadence. A "workspace" is a **cognitive unit**, not a git unit.
+**That's not how real work is structured.** A feature lives across `customer-portal`, `instance-manager`, and `supabase-bootstrap` — three separate repos with their own CI, their own remote, and their own release schedule. A "workspace" is a **mental unit**, not a git unit.
 
-cc-cockpit treats the workspace that way:
+cc-cockpit treats it that way:
 
 - The workspace parent is just a **directory**. Not a super-repo. Not a monorepo. Not a git worktree.
 - Each child is a first-class git repo — its own `.git/`, its own remote, its own history.
-- The cockpit observes sessions across all of them, in one attention loop, with one bell.
+- The cockpit watches sessions across all of them, in one place, with one bell.
 
-This is the differentiator. **Agent orchestrators locked to one git repo are legion. One that refuses to lock you in is — as far as we can tell — zero.**
+This is what makes it different. **Most tools force your agents into one git repo. cc-cockpit does not. As far as we know, it's the only one that does not.**
 
 ---
 
@@ -137,7 +140,7 @@ cc-cockpit mark-ended <sid-prefix>           # one session
 cc-cockpit mark-ended all-non-ended --yes    # all of them
 ```
 
-Dismissal is non-terminal: if the matched session was actually still live, its next event un-dismisses it.
+Dismissal is not final. If the matched session was actually still live, its next event brings it back into the active table.
 
 ---
 
@@ -150,7 +153,7 @@ Dismissal is non-terminal: if the matched session was actually still live, its n
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
 | `cc-cockpit start <repo> <task...>` | Open a new tmux window running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. |
-| `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **non-terminal**: if the session was actually still live, any later event from it (prompt, tool use, notification) un-dismisses it. Prefixes that match more than one session require `--yes`. |
+| `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **not final**: if the session was actually still live, any later event from it (prompt, tool use, notification) brings it back. Prefixes that match more than one session require `--yes`. |
 | `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session. `--yes` required because this always matches multiple sessions. |
 | `cc-cockpit reduce` | (debug) Read `events.jsonl` on stdin, print the reduced state as JSON. Useful for inspecting how the reducer interprets a log. |
 | `cc-cockpit --version` | Print version. |
@@ -171,10 +174,10 @@ Dismissal is non-terminal: if the matched session was actually still live, its n
 ## How it works (30-second version)
 
 1. When you `start`, `cc-cockpit` invokes `tmux new-window -e COCKPIT_SESSION_ACTIVE=1 ... claude` on the private `-L cc-cockpit` server.
-2. The `SessionStart` hook in `~/.claude/settings.json` fires. It's a silent no-op unless `COCKPIT_SESSION_ACTIVE=1` — so global hooks don't pollute non-cockpit Claude sessions.
+2. The `SessionStart` hook in `~/.claude/settings.json` fires. It is a silent no-op unless `COCKPIT_SESSION_ACTIVE=1`, so cc-cockpit's hooks do not affect Claude sessions started outside the cockpit.
 3. Every event (`SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`) appends an envelope to `events.jsonl` under an exclusive `flock`. Sequence numbers are monotonic; wall-clock is advisory.
-4. The dashboard pane loops every 0.5s: snapshots the log under a shared `flock`, runs the reducer in-process to produce `current.json`, renders, and rings the bell on new `waiting_input` entrants.
-5. There is no daemon. No IPC. No database. If the dashboard dies, `events.jsonl` keeps growing; on restart, the reducer reconstructs everything.
+4. The dashboard pane loops every 0.5s. It snapshots the log under a shared `flock`, runs the reducer in-process to produce `current.json`, renders the frame, and rings the bell on new `waiting_input` sessions.
+5. There is no daemon. No IPC. No database. If the dashboard dies, `events.jsonl` keeps growing. On restart, the reducer rebuilds the state from the log.
 
 Everything else is consequences of those five points.
 
