@@ -51,13 +51,13 @@ func TestRender_HeaderCounts(t *testing.T) {
 	if !strings.Contains(frame, "⚠ 2 malformed events skipped") {
 		t.Errorf("dropped warning line: %q", frame)
 	}
-	if w := utf8.RuneCountInString(first); w > 60 {
-		t.Errorf("header should fit in 60 cols, got %d: %q", w, first)
+	if w := utf8.RuneCountInString(first); w > 80 {
+		t.Errorf("header should fit in 80 cols, got %d: %q", w, first)
 	}
 }
 
 func TestRender_AllLinesFitDashboardPaneWidth(t *testing.T) {
-	const paneWidth = 60
+	const paneWidth = 80
 	st := state.State{
 		Sessions: map[string]*state.Session{
 			"abcdef0123456": {
@@ -148,6 +148,26 @@ func TestActivitySince_Formats(t *testing.T) {
 		got := activitySince(c.iso, now, c.suffix)
 		if got != c.want {
 			t.Errorf("activitySince(%q, suffix=%v) = %q, want %q", c.iso, c.suffix, got, c.want)
+		}
+	}
+}
+
+func TestRender_CommandsFooter_AlwaysVisible(t *testing.T) {
+	// The cheatsheet should appear whether the workspace has sessions or not.
+	empty := state.State{Sessions: map[string]*state.Session{}}
+	withSession := state.State{
+		Sessions: map[string]*state.Session{
+			"x": sessAt("running", "2026-04-20T15:00:00Z", "2026-04-20T15:00:00Z", "api", "task"),
+		},
+	}
+	now := time.Date(2026, 4, 20, 15, 0, 5, 0, time.UTC)
+	for label, st := range map[string]state.State{"empty": empty, "with-session": withSession} {
+		frame := Render(st, "ws", now)
+		if !strings.Contains(frame, "cc-cockpit start <repo> <task>") {
+			t.Errorf("[%s] cheatsheet missing the start example: %q", label, frame)
+		}
+		if !strings.Contains(frame, "control") {
+			t.Errorf("[%s] cheatsheet should reference the control pane: %q", label, frame)
 		}
 	}
 }

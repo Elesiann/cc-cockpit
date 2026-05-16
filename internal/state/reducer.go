@@ -197,9 +197,13 @@ func newSessionFromStart(ev *Event) *Session {
 		TaskName:             defaultNull(p.TaskName),
 		Cwd:                  defaultNull(p.Cwd),
 		PaneID:               defaultNull(p.PaneID),
-		Status:               StatusRunning,
-		StartedAt:            ev.WallClockISO8601,
-		LastActivity:         ev.WallClockISO8601,
-		LastPromptPreview:    jsonNull,
+		// A freshly-started Claude session is showing its prompt and
+		// waiting for the user to type the first message. Nothing is
+		// being processed yet, so "idle" is the truthful state. The
+		// first UserPromptSubmit flips it to "running".
+		Status:            StatusIdle,
+		StartedAt:         ev.WallClockISO8601,
+		LastActivity:      ev.WallClockISO8601,
+		LastPromptPreview: jsonNull,
 	}
 }
