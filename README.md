@@ -120,7 +120,7 @@ Three planes you always have in your head:
 - Linux, macOS, or WSL2.
 - [`tmux`](https://github.com/tmux/tmux) 3.0+ on `PATH`.
 - Claude Code 2.1+ with the hook event model (SessionStart, PostToolUse, Stop, SessionEnd, Notification, PermissionRequest, UserPromptSubmit).
-- Go 1.22+ if building from source.
+- Go 1.25+ if building from source.
 
 ---
 

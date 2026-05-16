@@ -26,7 +26,10 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/workspace"
 )
 
-const Version = "0.3.0"
+// Version is the binary's reported version. Overridden at release time via:
+//
+//	go build -ldflags="-X main.Version=<tag>"
+var Version = "0.3.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {

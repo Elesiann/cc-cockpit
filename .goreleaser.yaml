@@ -1,0 +1,55 @@
+version: 2
+
+project_name: cc-cockpit
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: cc-cockpit
+    main: ./cmd/cc-cockpit
+    binary: cc-cockpit
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.Version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  draft: false
+  prerelease: auto
+  header: |
+    `cc-cockpit {{ .Tag }}` — single static Linux binary; no daemon, no DB.
+    See [README](https://github.com/elesiann/cc-cockpit#readme) for usage.
