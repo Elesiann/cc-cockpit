@@ -48,6 +48,8 @@ func main() {
 		os.Exit(runHook(args))
 	case "dashboard":
 		os.Exit(runDashboard(args))
+	case "reduce":
+		os.Exit(runReduce(args))
 	case "install", "setup":
 		os.Exit(runInstall(args))
 	case "open":
@@ -73,12 +75,13 @@ Subcommands:
   install             install the binary on PATH and Claude Code hooks
   init                create .cc-cockpit/workspace.json
   doctor              check install + workspace health
-  open                open the cockpit (launches Zellij with dashboard + control)
+  open                open the cockpit (launches tmux with dashboard + control)
   start <repo> ...    open a Claude pane in repos[<repo>] running the given task
   spawn <repo> ...    alias for start
   mark-ended          dismiss stale sessions (synthetic SessionEnd)
   hook <Event>        internal: ingest a Claude Code hook payload
   dashboard           internal: render the dashboard pane (loop until SIGTERM)
+  reduce              read events.jsonl on stdin, write reduced state JSON to stdout
   --version           print version
   help                show this message`)
 }
@@ -424,7 +427,7 @@ func runHook(args []string) int {
 		PrimaryRepo:          os.Getenv("COCKPIT_PRIMARY_REPO"),
 		DeclaredRelatedRepos: os.Getenv("COCKPIT_DECLARED_RELATED_REPOS"),
 		TaskName:             os.Getenv("COCKPIT_TASK_NAME"),
-		PaneID:               envOrDefault("TMUX_PANE", os.Getenv("ZELLIJ_PANE_ID")),
+		PaneID:               os.Getenv("TMUX_PANE"),
 	}
 	ev := hook.Build(event, sid, payload, env)
 	if ev == nil {
@@ -498,6 +501,27 @@ func runDashboard(args []string) int {
 	}
 	if err := dashboard.Run(stateHome, workspaceName); err != nil {
 		die("dashboard", err.Error())
+	}
+	return 0
+}
+
+// ---------- reduce ----------
+
+// runReduce reads events.jsonl on stdin and prints the reduced state as
+// pretty-printed JSON. Used by the smoke test and as a debugging aid:
+//
+//	cc-cockpit reduce < ~/.local/state/cc-cockpit/<ws>/events.jsonl
+func runReduce(args []string) int {
+	if len(args) > 0 {
+		die("reduce", "unexpected arguments: %v", args)
+	}
+	st := state.Reduce(os.Stdin)
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(st); err != nil {
+		fmt.Fprintln(os.Stderr, "reduce:", err)
+		return 1
 	}
 	return 0
 }

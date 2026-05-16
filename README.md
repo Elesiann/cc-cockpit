@@ -305,7 +305,7 @@ cat ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl
 # (jq -c . is optional, but works; the reducer reads JSONL)
 ```
 
-**Dashboard shows `⚠ dropped=N` in the header** — the reducer skipped N malformed lines in `events.jsonl` (truncated writes, disk-full mid-append, manual edits). The rest of the log was processed normally. Reducer output for inspection: `cc-cockpit-reduce < ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl`.
+**Dashboard shows `⚠ dropped=N` in the header** — the reducer skipped N malformed lines in `events.jsonl` (truncated writes, disk-full mid-append, manual edits). The rest of the log was processed normally. Reducer output for inspection: `cc-cockpit reduce < ~/.local/state/cc-cockpit/<workspace-name>/events.jsonl`.
 
 ---
 
@@ -334,13 +334,13 @@ Most are on the v1.1/v1.5 roadmap.
 ├── LICENSE
 ├── go.mod / go.sum
 ├── cmd/
-│   ├── cc-cockpit/                    ← the main binary (single static Go executable)
-│   └── cc-cockpit-reduce/             ← reducer-as-binary (events.jsonl → current.json)
+│   └── cc-cockpit/                    ← the main binary (single static Go executable)
 ├── internal/
 │   ├── state/                         ← Event/Session types, reducer, flock-backed Append
 │   ├── workspace/                     ← workspace.json parsing, slug, repo discovery
 │   ├── hook/                          ← hook event-builder (pure)
 │   ├── dashboard/                     ← render loop + bell + frame renderer
+│   ├── tmux/                          ← tmux server / session / window wrapper
 │   └── install/                       ← Claude settings.json hook merge
 └── test/
     └── smoke.sh                       ← invariant-guarding end-to-end tests

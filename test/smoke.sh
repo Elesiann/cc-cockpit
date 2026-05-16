@@ -14,7 +14,7 @@
 #  (7) synthetic SessionEnd is revivable; natural SessionEnd is terminal
 #  (8) reducer is deterministic (byte-identical on repeat runs)
 #
-# Does NOT cover: actual Zellij launch end-to-end. Validated by manual smoke
+# Does NOT cover: actual tmux launch end-to-end. Validated by manual smoke
 # testing during development.
 
 set -u
@@ -24,11 +24,9 @@ BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 (cd "$HERE" && go build -o "$BUILD_DIR/cc-cockpit" ./cmd/cc-cockpit) \
   || { echo "smoke: go build cc-cockpit failed" >&2; exit 2; }
-(cd "$HERE" && go build -o "$BUILD_DIR/cc-cockpit-reduce" ./cmd/cc-cockpit-reduce) \
-  || { echo "smoke: go build cc-cockpit-reduce failed" >&2; exit 2; }
 
 BIN="$BUILD_DIR/cc-cockpit"
-REDUCER="$BUILD_DIR/cc-cockpit-reduce"
+REDUCER=("$BIN" reduce)
 
 PASS=0
 FAIL=0
@@ -324,8 +322,8 @@ THIS LINE IS NOT JSON
 {"seq":101,"wall_clock_iso8601":"not-a-date","event_type":"SessionStart","session_id":"badtime","payload":{}}
 {"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"Stop","session_id":"s1","payload":{}}
 EOF
-dropped="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.dropped_events')"
-status="$("$REDUCER" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status')"
+dropped="$("${REDUCER[@]}" < "$SANDBOX/events-bad.jsonl" | jq -r '.dropped_events')"
+status="$("${REDUCER[@]}" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status')"
 [ "$dropped" = "4" ] && [ "$status" = "idle" ] \
   && pass "reducer: dropped=$dropped, status=$status" \
   || fail "reducer: dropped=$dropped, status=$status (expected 4, idle)"
@@ -354,8 +352,8 @@ cat > "$SANDBOX/events-dismiss.jsonl" <<EOF
 {"seq":5,"wall_clock_iso8601":"2026-04-20T15:00:04Z","event_type":"UserPromptSubmit","session_id":"a","payload":{"prompt_preview":"alive"}}
 {"seq":6,"wall_clock_iso8601":"2026-04-20T15:00:05Z","event_type":"UserPromptSubmit","session_id":"b","payload":{"prompt_preview":"zombie"}}
 EOF
-a_status="$("$REDUCER" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.a.status')"
-b_status="$("$REDUCER" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.status')"
+a_status="$("${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.a.status')"
+b_status="$("${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.status')"
 [ "$a_status" = "running" ] && [ "$b_status" = "ended" ] \
   && pass "synthetic-end revived (a=$a_status); natural-end terminal (b=$b_status)" \
   || fail "dismissal logic broken: a=$a_status (want running), b=$b_status (want ended)"
@@ -363,8 +361,8 @@ b_status="$("$REDUCER" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.st
 # =============================================================
 echo '[11] reducer determinism'
 # =============================================================
-"$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r1"
-"$REDUCER" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r2"
+"${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r1"
+"${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r2"
 cmp -s "$SANDBOX/r1" "$SANDBOX/r2" \
   && pass 'byte-identical across two runs' \
   || fail 'reducer not deterministic'
