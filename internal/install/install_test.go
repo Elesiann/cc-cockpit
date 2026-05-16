@@ -99,3 +99,65 @@ func TestMergeHooks_RejectsInvalidJSON(t *testing.T) {
 		t.Errorf("expected error on invalid JSON")
 	}
 }
+
+func TestHooksInstalled_EmptyReturnsFalse(t *testing.T) {
+	ok, err := HooksInstalled(nil)
+	if err != nil || ok {
+		t.Errorf("empty data: got (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+	ok, err = HooksInstalled([]byte("   \n  "))
+	if err != nil || ok {
+		t.Errorf("whitespace data: got (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+}
+
+func TestHooksInstalled_FullMergeReturnsTrue(t *testing.T) {
+	merged, err := MergeHooks(nil, "/usr/local/bin/cc-cockpit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := HooksInstalled(merged)
+	if err != nil || !ok {
+		t.Errorf("expected (true, nil) after MergeHooks, got (ok=%v, err=%v)", ok, err)
+	}
+}
+
+func TestHooksInstalled_MissingOneEventReturnsFalse(t *testing.T) {
+	merged, _ := MergeHooks(nil, "/bin/cc-cockpit")
+	// Strip SessionEnd hooks back out.
+	var top map[string]any
+	if err := json.Unmarshal(merged, &top); err != nil {
+		t.Fatal(err)
+	}
+	hooks := top["hooks"].(map[string]any)
+	delete(hooks, "SessionEnd")
+	stripped, _ := json.Marshal(top)
+	ok, err := HooksInstalled(stripped)
+	if err != nil || ok {
+		t.Errorf("missing SessionEnd: got (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+}
+
+func TestHooksInstalled_MissingMatcherReturnsFalse(t *testing.T) {
+	// Hand-craft settings: every event has a cockpit hook, but Notification
+	// lacks the matcher field (or has the wrong one).
+	settings := `{"hooks":{`
+	for i, ev := range Events {
+		if i > 0 {
+			settings += ","
+		}
+		settings += `"` + ev + `":[{"hooks":[{"type":"command","command":"/bin/cc-cockpit hook ` + ev + `"}]}]`
+	}
+	settings += `}}`
+	ok, err := HooksInstalled([]byte(settings))
+	if err != nil || ok {
+		t.Errorf("no Notification matcher: got (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+}
+
+func TestHooksInstalled_InvalidJSONReturnsError(t *testing.T) {
+	ok, err := HooksInstalled([]byte(`{not json`))
+	if err == nil || ok {
+		t.Errorf("invalid JSON: got (ok=%v, err=%v), want (false, <error>)", ok, err)
+	}
+}

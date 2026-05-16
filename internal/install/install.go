@@ -142,6 +142,76 @@ func InstallHooks(settingsPath, binPath string) error {
 	return os.Rename(tmp, settingsPath)
 }
 
+// HooksInstalled reports whether settingsData contains a cc-cockpit hook
+// for every event in Events AND the Notification entry uses the expected
+// "idle_prompt|permission_prompt" matcher. Empty/missing settings → false.
+// JSON parse errors propagate. Read-only: never mutates input.
+func HooksInstalled(settingsData []byte) (bool, error) {
+	if len(bytes.TrimSpace(settingsData)) == 0 {
+		return false, nil
+	}
+	var top struct {
+		Hooks map[string][]any `json:"hooks"`
+	}
+	if err := json.Unmarshal(settingsData, &top); err != nil {
+		return false, err
+	}
+	for _, ev := range Events {
+		found := false
+		for _, e := range top.Hooks[ev] {
+			if entryHasCockpitHook(e) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false, nil
+		}
+	}
+	for _, e := range top.Hooks[state.EventNotification] {
+		if EntryHasMatcher(e, "idle_prompt|permission_prompt") {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// EnsureHooks installs cc-cockpit's Claude Code hooks if HooksInstalled
+// is false. Silent no-op when already correct. Resolves settingsPath from
+// CLAUDE_SETTINGS_PATH / ~/.claude/settings.json when empty.
+//
+// Designed for `cc-cockpit open` to self-bootstrap; does NOT touch the
+// binary symlink (whoever is calling is already on PATH).
+func EnsureHooks(settingsPath string) error {
+	if settingsPath == "" {
+		if p := os.Getenv("CLAUDE_SETTINGS_PATH"); p != "" {
+			settingsPath = p
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("home dir: %w", err)
+			}
+			settingsPath = filepath.Join(home, ".claude", "settings.json")
+		}
+	}
+	data, _ := os.ReadFile(settingsPath) // missing file is fine; InstallHooks creates it
+	ok, err := HooksInstalled(data)
+	if err != nil {
+		return fmt.Errorf("settings.json invalid: %w", err)
+	}
+	if ok {
+		return nil
+	}
+	selfPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate binary: %w", err)
+	}
+	if real, err := filepath.EvalSymlinks(selfPath); err == nil {
+		selfPath = real
+	}
+	return InstallHooks(settingsPath, selfPath)
+}
+
 // InstallBin symlinks binDir/cc-cockpit -> selfPath. No-op if the symlink
 // already points there; otherwise replaces whatever's there.
 func InstallBin(binDir, selfPath string) error {

@@ -605,7 +605,10 @@ func runOpen(args []string) int {
 	}
 	root := workspace.FindRoot(cwd)
 	if root == "" {
-		die("open", "Not in a cc-cockpit workspace. Run 'cc-cockpit init' from the workspace parent first.")
+		if err := workspace.AutoInitIfMissing(cwd); err != nil {
+			die("open", "auto-init: %v", err)
+		}
+		root = cwd
 	}
 	canonical, err := filepath.EvalSymlinks(root)
 	if err != nil {
@@ -614,6 +617,9 @@ func runOpen(args []string) int {
 	ws, err := workspace.Load(root)
 	if err != nil {
 		die("open", "%v", err)
+	}
+	if err := install.EnsureHooks(""); err != nil {
+		die("open", "auto-install hooks: %v", err)
 	}
 	if !workspace.ValidSlug(ws.Name) {
 		die("open", "invalid workspace name %q (must match ^[a-zA-Z0-9][a-zA-Z0-9._-]*$)", ws.Name)

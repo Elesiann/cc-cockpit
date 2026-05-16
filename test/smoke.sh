@@ -114,6 +114,57 @@ for bad in '../evil' 'foo/bar' '.hidden' '' 'a b'; do
   fi
 done
 
+# Fake tmux — used by [2.5] and [3]'s open assertions. Records argv to
+# $SANDBOX/open-tmux.args; reports "no session" so open proceeds to create.
+mkdir -p "$SANDBOX/open-fake-bin"
+cat > "$SANDBOX/open-fake-bin/tmux" <<EOF
+#!/bin/bash
+printf '%s\n' "\$@" >> "$SANDBOX/open-tmux.args"
+# tmux is invoked as: tmux -L cc-cockpit <subcmd> ...; subcmd is \$3.
+case "\$3" in
+  has-session) exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$SANDBOX/open-fake-bin/tmux"
+
+# =============================================================
+echo '[2.5] open auto-bootstraps (workspace.json + Claude hooks)'
+# =============================================================
+mkdir -p "$SANDBOX/ws-autoinit/api" "$SANDBOX/ws-autoinit/web"
+(cd "$SANDBOX/ws-autoinit/api" && git init -q)
+(cd "$SANDBOX/ws-autoinit/web" && git init -q)
+FRESH_SETTINGS="$SANDBOX/fresh-claude/settings.json"
+out="$(cd "$SANDBOX/ws-autoinit" \
+  && PATH="$SANDBOX/open-fake-bin:$PATH" \
+     CLAUDE_SETTINGS_PATH="$FRESH_SETTINGS" \
+     "$BIN" open 2>&1)"
+rc=$?
+ws_name="$(jq -r '.name' "$SANDBOX/ws-autoinit/.cc-cockpit/workspace.json" 2>/dev/null)"
+api_path="$(jq -r '.repos.api // empty' "$SANDBOX/ws-autoinit/.cc-cockpit/workspace.json" 2>/dev/null)"
+web_path="$(jq -r '.repos.web // empty' "$SANDBOX/ws-autoinit/.cc-cockpit/workspace.json" 2>/dev/null)"
+hooks_count="$(jq '[.hooks.SessionStart[] | .hooks[]? | select(.command | contains("cc-cockpit hook SessionStart"))] | length' "$FRESH_SETTINGS" 2>/dev/null)"
+if [ "$rc" -eq 0 ] && [ "$ws_name" = "ws-autoinit" ] \
+   && [ "$api_path" = "api" ] && [ "$web_path" = "web" ] \
+   && [ "$hooks_count" = "1" ]; then
+  pass 'open auto-inits workspace.json AND installs Claude hooks from scratch'
+else
+  fail "open auto-bootstrap failed: rc=$rc ws_name=$ws_name api=$api_path web=$web_path hooks=$hooks_count out='$out'"
+fi
+
+mkdir -p "$SANDBOX/ws-empty"
+out="$(cd "$SANDBOX/ws-empty" \
+  && PATH="$SANDBOX/open-fake-bin:$PATH" \
+     CLAUDE_SETTINGS_PATH="$SETTINGS" \
+     "$BIN" open 2>&1)"
+rc=$?
+empty_repos="$(jq -c '.repos' "$SANDBOX/ws-empty/.cc-cockpit/workspace.json" 2>/dev/null)"
+if [ "$rc" -eq 0 ] && [ "$empty_repos" = "{}" ]; then
+  pass 'open auto-inits with empty repos when no child repos found'
+else
+  fail "open auto-init (empty) failed: rc=$rc repos=$empty_repos out='$out'"
+fi
+
 # =============================================================
 echo '[3] init bootstraps workspace.json'
 # =============================================================
@@ -152,18 +203,8 @@ explicit_path="$(jq -r '.repos.api // empty' "$SANDBOX/ws-explicit/.cc-cockpit/w
   && pass 'init accepts explicit repo=path specs' \
   || fail "init explicit failed: rc=$rc out='$out' path=$explicit_path"
 
-mkdir -p "$SANDBOX/open-fake-bin"
-cat > "$SANDBOX/open-fake-bin/tmux" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" >> "$SANDBOX/open-tmux.args"
-# tmux is invoked as: tmux -L cc-cockpit <subcmd> ...; subcmd is \$3.
-case "\$3" in
-  has-session) exit 1 ;;
-esac
-exit 0
-EOF
-chmod +x "$SANDBOX/open-fake-bin/tmux"
-out="$(cd "$SANDBOX/ws-init" && PATH="$SANDBOX/open-fake-bin:$PATH" "$BIN" open 2>&1)"
+> "$SANDBOX/open-tmux.args"  # reset capture between [2.5] and [3]
+out="$(cd "$SANDBOX/ws-init" && PATH="$SANDBOX/open-fake-bin:$PATH" CLAUDE_SETTINGS_PATH="$SETTINGS" "$BIN" open 2>&1)"
 rc=$?
 if [ "$rc" -eq 0 ] \
    && grep -qx -- 'new-session' "$SANDBOX/open-tmux.args" \

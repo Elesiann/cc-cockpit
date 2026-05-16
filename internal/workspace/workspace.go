@@ -191,6 +191,35 @@ func resolveRepo(root, path string) (relPath, absPath string, err error) {
 	return relPath, absPath, nil
 }
 
+// AutoInitIfMissing creates .cc-cockpit/workspace.json at root if none
+// exists, with a default name and auto-discovered child git repos. No-op
+// when the file is already present. Empty repo set is allowed — callers
+// of `cc-cockpit start` can fall back to explicit paths.
+//
+// Used by `cc-cockpit open` to make first-time setup invisible. Strict
+// validation lives in `cc-cockpit init`.
+func AutoInitIfMissing(root string) error {
+	if _, err := os.Stat(filepath.Join(root, ".cc-cockpit", "workspace.json")); err == nil {
+		return nil
+	}
+	ws := &Workspace{Name: tmuxSafeSlug(SlugFromPath(root)), Repos: map[string]string{}}
+	if repoDirs, err := DiscoverRepos(root); err == nil {
+		for _, repoDir := range repoDirs {
+			// Per-repo errors (e.g. duplicate label from sibling dirs sharing
+			// a basename) are tolerated silently — this is the lenient path.
+			_ = ws.AddRepo(root, SlugFromPath(repoDir), repoDir)
+		}
+	}
+	return ws.Save(root)
+}
+
+// tmuxSafeSlug strips characters tmux rejects in session names. SlugFromPath
+// permits '.' and we never see ':' from it, but a dir like "project.v2"
+// would otherwise fail `runOpen`'s tmux-name validation.
+func tmuxSafeSlug(s string) string {
+	return strings.NewReplacer(".", "-", ":", "-").Replace(s)
+}
+
 // DiscoverRepos returns absolute paths of child git repos at depths 1–3
 // under root (.git/ at depths 2–4 to match `find -mindepth 2 -maxdepth 4`).
 func DiscoverRepos(root string) ([]string, error) {
