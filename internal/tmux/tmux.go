@@ -34,7 +34,10 @@ func NewSession(name string, env []string) error {
 	if err := cmd(splitControlArgs(name, env)...).Run(); err != nil {
 		return fmt.Errorf("split-window: %w", err)
 	}
-	if err := cmd("resize-pane", "-t", name+":0.0", "-x", "60").Run(); err != nil {
+	// 80 cols on the dashboard pane: standard terminal-width minimum, plus
+	// room for the active/ended tables to render long repo names without
+	// truncation. Matches the column caps in internal/dashboard/render.go.
+	if err := cmd("resize-pane", "-t", name+":0.0", "-x", "80").Run(); err != nil {
 		return fmt.Errorf("resize-pane: %w", err)
 	}
 	// Label the cockpit panes so the border title isn't the bash fallback

@@ -21,6 +21,8 @@ func Render(st state.State, workspaceName string, now time.Time) string {
 		b.WriteString("\n\n")
 		b.WriteString(footer)
 	}
+	b.WriteString("\n\n")
+	b.WriteString(renderCommandsFooter())
 	return b.String()
 }
 
@@ -72,11 +74,11 @@ func renderActiveTable(st state.State, now time.Time) string {
 	fmt.Fprintln(tw, "STATUS\tSID\tREPO\tTASK\tACT")
 	for _, r := range active {
 		s := r.sess
-		// Caps chosen so a worst-case row fits a 60-col dashboard pane after
-		// tabwriter padding: status(9) + sid(8) + repo(10) + task(22) + act(4)
-		// + 4×2 padding ≈ 61, with breathing room for typical content.
-		repo := truncRunes(jsonRawString(s.PrimaryRepo, "—"), 10)
-		task := truncRunes(jsonRawString(s.TaskName, "—"), 22)
+		// Caps chosen so a worst-case row fits an 80-col dashboard pane after
+		// tabwriter padding: status(9) + sid(8) + repo(18) + task(30) + act(5)
+		// + 4×2 padding = 78, with breathing room for typical content.
+		repo := truncRunes(jsonRawString(s.PrimaryRepo, "—"), 18)
+		task := truncRunes(jsonRawString(s.TaskName, "—"), 30)
 		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n",
 			glyph(s.Status), shortStatus(s.Status),
 			shortSID(r.sid),
@@ -129,6 +131,19 @@ func renderEndedFooter(st state.State, now time.Time) string {
 		)
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// renderCommandsFooter prints a stable cheatsheet so a first-time user
+// knows the commands and where to run them (the "control" pane, not
+// here). Kept short — four lines — so it never pushes the table off
+// screen on a normal terminal height.
+func renderCommandsFooter() string {
+	return strings.Join([]string{
+		"─── commands ─── (run them in the \"control\" pane →)",
+		"  cc-cockpit start <repo> <task>   spawn a Claude session",
+		"  cc-cockpit mark-ended <prefix>   dismiss a stuck session",
+		"  Ctrl-b d                         detach (sessions persist)",
+	}, "\n")
 }
 
 func glyph(status string) string {
