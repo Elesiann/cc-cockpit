@@ -30,7 +30,7 @@ import (
 // Version is the binary's reported version. Overridden at release time via:
 //
 //	go build -ldflags="-X main.Version=<tag>"
-var Version = "0.5.1"
+var Version = "0.6.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -52,6 +52,8 @@ func main() {
 		os.Exit(runHook(args))
 	case "dashboard":
 		os.Exit(runDashboard(args))
+	case "watch":
+		os.Exit(runWatch(args))
 	case "reduce":
 		os.Exit(runReduce(args))
 	case "install", "setup":
@@ -83,6 +85,7 @@ Subcommands:
   doctor              check install + workspace health
   open                open the cockpit (launches tmux with dashboard + control)
   close [<ws>]        close the cockpit (kill the workspace's tmux session); --all kills every cockpit session
+  watch               headless dashboard: aggregate every workspace's sessions in any terminal
   start [<repo>] <task>   open a Claude pane in repos[<repo>] running the given task (repo auto-detected from cwd if inside a repo)
   start-fleet <repo> ...  open an Agent View pane scoped to repos[<repo>] (multi-agent)
   end <prefix>            end a session (synthetic SessionEnd) and close its tmux pane
@@ -529,8 +532,27 @@ func runDashboard(args []string) int {
 	if workspaceName == "" {
 		workspaceName = "?"
 	}
-	if err := dashboard.Run(stateHome, workspaceName); err != nil {
+	src := dashboard.SingleSource{StateHome: stateHome, WorkspaceName: workspaceName}
+	opts := dashboard.Options{ApplyTmuxBorderColors: true, WriteCurrentJSON: true}
+	if err := dashboard.Run(src, opts); err != nil {
 		die("dashboard", err.Error())
+	}
+	return 0
+}
+
+// ---------- watch ----------
+
+// runWatch renders an aggregate of every workspace under the cc-cockpit state
+// root in the current terminal. Read-only, no tmux, no spawn. Exits on
+// SIGINT/SIGTERM.
+func runWatch(args []string) int {
+	if len(args) > 0 {
+		die("watch", "unexpected arguments: %v", args)
+	}
+	root := dashboard.DefaultStateRoot(homeDir(), os.Getenv)
+	src := dashboard.AggregateSource{StateRoot: root}
+	if err := dashboard.Run(src, dashboard.Options{}); err != nil {
+		die("watch", err.Error())
 	}
 	return 0
 }

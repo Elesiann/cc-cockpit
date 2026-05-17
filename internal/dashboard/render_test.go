@@ -178,6 +178,93 @@ func TestRender_CommandsFooter_AlwaysVisible(t *testing.T) {
 	}
 }
 
+func TestRender_StaleFlag_OnRunningOnly(t *testing.T) {
+	now := time.Date(2026, 4, 20, 16, 0, 0, 0, time.UTC)
+	// 20 minutes ago — past StaleAfter (15m).
+	staleTS := "2026-04-20T15:40:00Z"
+	// 5 minutes ago — under threshold.
+	freshTS := "2026-04-20T15:55:00Z"
+
+	cases := []struct {
+		name        string
+		status      string
+		lastAct     string
+		wantStaleQ  bool
+	}{
+		{"running + old", state.StatusRunning, staleTS, true},
+		{"running + fresh", state.StatusRunning, freshTS, false},
+		{"waiting_input + old", state.StatusWaitingInput, staleTS, false},
+		{"idle + old", state.StatusIdle, staleTS, false},
+	}
+	for _, c := range cases {
+		s := sessAt(c.status, "2026-04-20T14:00:00Z", c.lastAct, "api", "fix bug")
+		got := shortStatusWithStale(s, now)
+		hasQ := strings.HasSuffix(got, "?")
+		if hasQ != c.wantStaleQ {
+			t.Errorf("%s: shortStatusWithStale=%q, hasQ=%v, want=%v", c.name, got, hasQ, c.wantStaleQ)
+		}
+	}
+}
+
+func TestRenderMulti_IncludesWSColumn(t *testing.T) {
+	now := time.Date(2026, 4, 20, 15, 0, 30, 0, time.UTC)
+	samples := []TaggedState{
+		{
+			Name: "ws-alpha",
+			State: state.State{
+				Sessions: map[string]*state.Session{
+					"sid-a": sessAt("running", "2026-04-20T15:00:00Z", "2026-04-20T15:00:00Z", "api", "fix"),
+				},
+			},
+		},
+		{
+			Name: "ws-beta",
+			State: state.State{
+				Sessions: map[string]*state.Session{
+					"sid-b": sessAt("waiting_input", "2026-04-20T15:00:10Z", "2026-04-20T15:00:10Z", "web", "ship"),
+				},
+			},
+		},
+	}
+	frame := RenderMulti(samples, "watch · 2 workspace(s)", now)
+	if !strings.Contains(frame, "STATUS") || !strings.Contains(frame, "WS") {
+		t.Errorf("expected WS column header in multi render, got:\n%s", frame)
+	}
+	if !strings.Contains(frame, "ws-alpha") || !strings.Contains(frame, "ws-beta") {
+		t.Errorf("expected both workspace names in rows, got:\n%s", frame)
+	}
+	if !strings.Contains(frame, "watch · 2 workspace(s)") {
+		t.Errorf("expected aggregate title in header, got:\n%s", frame)
+	}
+	// header active count: 1 running + 1 waiting = 2.
+	if !strings.Contains(frame, "active=2") {
+		t.Errorf("expected active=2 in header, got:\n%s", frame)
+	}
+}
+
+func TestRenderMulti_NoSessions(t *testing.T) {
+	frame := RenderMulti(nil, "watch · 0 workspace(s)", time.Now())
+	if !strings.Contains(frame, "no active sessions across any workspace") {
+		t.Errorf("expected friendly empty message, got:\n%s", frame)
+	}
+}
+
+func TestRender_SingleWorkspaceHasNoWSColumn(t *testing.T) {
+	// Sanity check: the existing single-workspace render must not regress
+	// by accidentally adding the WS column from the multi path.
+	st := state.State{
+		Sessions: map[string]*state.Session{
+			"sid-a": sessAt("running", "2026-04-20T15:00:00Z", "2026-04-20T15:00:00Z", "api", "fix"),
+		},
+	}
+	frame := Render(st, "ws", time.Date(2026, 4, 20, 15, 0, 5, 0, time.UTC))
+	// Header row in single mode: STATUS  SID  REPO  TASK  ACT (no WS).
+	headerLine := strings.Split(frame, "\n")[2]
+	if strings.Contains(headerLine, "\tWS\t") || strings.Contains(headerLine, " WS ") {
+		t.Errorf("single Render should not include WS column, got header: %q", headerLine)
+	}
+}
+
 func TestJsonRawString_NullFallsBack(t *testing.T) {
 	if got := jsonRawString(json.RawMessage("null"), "—"); got != "—" {
 		t.Errorf("null should fall back: got %q", got)

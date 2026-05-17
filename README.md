@@ -115,6 +115,23 @@ The `name` field is the runtime state directory key (must match `^[a-zA-Z0-9][a-
 
 ---
 
+## Watch mode (headless, multi-workspace)
+
+For a glanceable view without booting the cockpit, run:
+
+```bash
+cc-cockpit watch
+```
+
+`watch` opens a read-only dashboard in the current terminal that aggregates **every** cc-cockpit-tracked workspace into a single table — no tmux, no control pane, no `init`. It scans `~/.local/state/cc-cockpit/*/events.jsonl` (or `$XDG_STATE_HOME/cc-cockpit/...`) and shows one row per non-ended session, with an extra `WS` column so workspaces are easy to distinguish.
+
+Useful when you have several `cc-cockpit open` cockpits across different parents of your filesystem, or when sessions are dispatched by Agent View / `claude --bg` and you just want one screen that shows them all.
+
+- **Stale flag:** a `running` session with no events for 15 minutes renders as `running?` (probably crashed mid-turn). Cockpit-spawned sessions already get a synthetic `SessionEnd` from the tmux `pane-exited` hook; this is the headless equivalent.
+- **Desktop notifications:** when a session enters `waiting_input`, `watch` also calls `wsl-notify-send.exe` / `notify-send` / `osascript` (whichever resolves on PATH) so you don't miss the bell on Windows Terminal under WSL2. At boot it prints which backend was chosen to stderr.
+- **Coexists with `open`:** the two modes share the same event log files. You can run `watch` in one terminal and `open` in another and they'll show the same data.
+- **Exit:** `Ctrl-C` restores the terminal cleanly. `watch` writes nothing except the bell baseline next to each workspace's `events.jsonl`.
+
 ## Inside the cockpit
 
 ```
@@ -159,6 +176,7 @@ The end is not final. If the matched session was actually still live (no real pa
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create `.cc-cockpit/workspace.json`; with no repo specs, auto-discovers child git repos. |
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
+| `cc-cockpit watch` | Headless dashboard: aggregate every workspace's sessions in the current terminal (no tmux, no setup). Ctrl-C to exit. |
 | `cc-cockpit close [<workspace>] [--yes]` | Kill the workspace's tmux session (closes the cockpit). Discovers the workspace from `$COCKPIT_WORKSPACE_NAME` if run from inside, else walks up cwd. Requires `--yes` to confirm the live sessions about to die. |
 | `cc-cockpit close --all [--yes]` | Kill the entire cc-cockpit tmux server (every workspace at once). |
 | `cc-cockpit start [<repo>] <task...>` | Open a new pane below the dashboard, running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. The `<repo>` arg can be omitted when the shell's cwd is inside a known repo — cc-cockpit picks the longest-prefix match. |

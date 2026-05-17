@@ -11,7 +11,13 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
-// Render produces the dashboard frame for st as of now.
+// StaleAfter is how long a `running` session may go without any new event
+// before the dashboard flags it as probably-crashed. Only applied to running;
+// idle/waiting_input are already "nothing happening" states.
+const StaleAfter = 15 * time.Minute
+
+// Render produces the dashboard frame for st as of now (single-workspace
+// view: no WS column).
 func Render(st state.State, workspaceName string, now time.Time) string {
 	var b strings.Builder
 	b.WriteString(renderHeader(st, workspaceName))
@@ -23,6 +29,22 @@ func Render(st state.State, workspaceName string, now time.Time) string {
 	}
 	b.WriteString("\n\n")
 	b.WriteString(renderCommandsFooter())
+	return b.String()
+}
+
+// RenderMulti renders aggregated samples for `watch` mode. Adds a WS column
+// and a header that summarizes across all workspaces.
+func RenderMulti(samples []TaggedState, title string, now time.Time) string {
+	var b strings.Builder
+	b.WriteString(renderMultiHeader(samples, title))
+	b.WriteString("\n\n")
+	b.WriteString(renderMultiActiveTable(samples, now))
+	if footer := renderMultiEndedFooter(samples, now); footer != "" {
+		b.WriteString("\n\n")
+		b.WriteString(footer)
+	}
+	b.WriteString("\n\n")
+	b.WriteString(renderWatchFooter())
 	return b.String()
 }
 
@@ -47,6 +69,34 @@ func renderHeader(st state.State, ws string) string {
 		truncRunes(ws, 16), active, running, waiting, idle, ended)
 	if st.DroppedEvents > 0 {
 		h += fmt.Sprintf("\n⚠ %d malformed events skipped", st.DroppedEvents)
+	}
+	return h
+}
+
+func renderMultiHeader(samples []TaggedState, title string) string {
+	var active, running, waiting, idle, ended, dropped int
+	for _, s := range samples {
+		for _, sess := range s.State.Sessions {
+			switch sess.Status {
+			case state.StatusRunning:
+				running++
+				active++
+			case state.StatusWaitingInput:
+				waiting++
+				active++
+			case state.StatusIdle:
+				idle++
+				active++
+			case state.StatusEnded:
+				ended++
+			}
+		}
+		dropped += s.State.DroppedEvents
+	}
+	h := fmt.Sprintf("── %s ──  active=%d  ▶%d ●%d ◯%d  ended=%d ──",
+		truncRunes(title, 32), active, running, waiting, idle, ended)
+	if dropped > 0 {
+		h += fmt.Sprintf("\n⚠ %d malformed events skipped", dropped)
 	}
 	return h
 }
@@ -80,8 +130,53 @@ func renderActiveTable(st state.State, now time.Time) string {
 		repo := truncRunes(jsonRawString(s.PrimaryRepo, "—"), 18)
 		task := truncRunes(jsonRawString(s.TaskName, "—"), 30)
 		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n",
-			glyph(s.Status), shortStatus(s.Status),
+			glyph(s.Status), shortStatusWithStale(s, now),
 			shortSID(r.sid),
+			repo,
+			task,
+			activitySince(s.LastActivity, now, false),
+		)
+	}
+	_ = tw.Flush()
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderMultiActiveTable(samples []TaggedState, now time.Time) string {
+	type row struct {
+		sid  string
+		ws   string
+		sess *state.Session
+	}
+	var active []row
+	for _, s := range samples {
+		for sid, sess := range s.State.Sessions {
+			if sess.Status != state.StatusEnded {
+				active = append(active, row{sid, s.Name, sess})
+			}
+		}
+	}
+	sort.Slice(active, func(i, j int) bool {
+		if active[i].sess.StartedAt != active[j].sess.StartedAt {
+			return active[i].sess.StartedAt < active[j].sess.StartedAt
+		}
+		return active[i].sid < active[j].sid
+	})
+	if len(active) == 0 {
+		return "  (no active sessions across any workspace)"
+	}
+
+	var b strings.Builder
+	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(tw, "STATUS\tSID\tWS\tREPO\tTASK\tACT")
+	for _, r := range active {
+		s := r.sess
+		ws := truncRunes(r.ws, 12)
+		repo := truncRunes(jsonRawString(s.PrimaryRepo, "—"), 16)
+		task := truncRunes(jsonRawString(s.TaskName, "—"), 26)
+		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\t%s\n",
+			glyph(s.Status), shortStatusWithStale(s, now),
+			shortSID(r.sid),
+			ws,
 			repo,
 			task,
 			activitySince(s.LastActivity, now, false),
@@ -133,6 +228,52 @@ func renderEndedFooter(st state.State, now time.Time) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func renderMultiEndedFooter(samples []TaggedState, now time.Time) string {
+	type row struct {
+		sid     string
+		ws      string
+		sess    *state.Session
+		sortKey string
+	}
+	var ended []row
+	for _, s := range samples {
+		for sid, sess := range s.State.Sessions {
+			if sess.Status != state.StatusEnded {
+				continue
+			}
+			key := jsonRawString(sess.EndedAt, "")
+			if key == "" {
+				key = sess.LastActivity
+			}
+			ended = append(ended, row{sid, s.Name, sess, key})
+		}
+	}
+	if len(ended) == 0 {
+		return ""
+	}
+	sort.Slice(ended, func(i, j int) bool { return ended[i].sortKey > ended[j].sortKey })
+	if len(ended) > 3 {
+		ended = ended[:3]
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "─── ended (last %d) ───\n", len(ended))
+	for _, r := range ended {
+		when := jsonRawString(r.sess.EndedAt, "")
+		if when == "" {
+			when = r.sess.LastActivity
+		}
+		fmt.Fprintf(&b, "  ◼ %s  [%s]  %s  %s  (%s)\n",
+			shortSID(r.sid),
+			truncRunes(r.ws, 12),
+			jsonRawString(r.sess.PrimaryRepo, "—"),
+			jsonRawString(r.sess.TaskName, "—"),
+			activitySince(when, now, true),
+		)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // renderCommandsFooter prints a stable cheatsheet so a first-time user
 // knows the commands and where to run them (the "control" pane, not
 // here). Kept short so it never pushes the table off screen on a normal
@@ -146,6 +287,16 @@ func renderCommandsFooter() string {
 		"  start-fleet <repo> [name]  open an Agent View pane (multi-agent)",
 		"  end <prefix>               end a session and close its pane",
 		"  Ctrl-b d                   detach (sessions persist)",
+	}, "\n")
+}
+
+// renderWatchFooter is the cheatsheet for `cc-cockpit watch` — read-only
+// viewer with no control pane, so the help text differs.
+func renderWatchFooter() string {
+	return strings.Join([]string{
+		"─── watch (read-only) ───",
+		"  shows every cc-cockpit workspace at once. `?` = no activity 15m+ (possibly crashed).",
+		"  Ctrl-C to exit. Use `cc-cockpit open` in a workspace to interact.",
 	}, "\n")
 }
 
@@ -170,6 +321,33 @@ func shortStatus(s string) string {
 		return "waiting"
 	}
 	return s
+}
+
+// shortStatusWithStale appends `?` to running sessions that have gone
+// quiet for StaleAfter. The reducer never sees this — it's a render-time
+// derivation only.
+func shortStatusWithStale(s *state.Session, now time.Time) string {
+	if isStale(s, now) {
+		return shortStatus(s.Status) + "?"
+	}
+	return shortStatus(s.Status)
+}
+
+// isStale reports whether a running session looks dead. Only `running`
+// gets the stale treatment — idle/waiting_input are quiet by design, so
+// flagging them adds no signal.
+func isStale(s *state.Session, now time.Time) bool {
+	if s.Status != state.StatusRunning {
+		return false
+	}
+	if s.LastActivity == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339, s.LastActivity)
+	if err != nil {
+		return false
+	}
+	return now.Sub(t) > StaleAfter
 }
 
 func shortSID(sid string) string {

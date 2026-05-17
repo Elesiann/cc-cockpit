@@ -13,28 +13,27 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/elesiann/cc-cockpit/internal/state"
-	"github.com/elesiann/cc-cockpit/internal/tmux"
 )
 
-// Run drives the dashboard loop until SIGINT/SIGTERM/SIGHUP/SIGQUIT.
-func Run(stateHome, workspaceName string) error {
-	if err := os.MkdirAll(stateHome, 0o755); err != nil {
-		return err
-	}
+// Options tunes Run's behavior. Empty values are fine — Run picks safe
+// defaults so most callers can pass dashboard.Options{}.
+type Options struct {
+	// ApplyTmuxBorderColors is true only for the in-cockpit dashboard,
+	// where the dashboard pane is a sibling of the Claude panes and can
+	// color their borders. `watch` runs outside tmux and must skip this.
+	ApplyTmuxBorderColors bool
+	// WriteCurrentJSON is true only for the in-cockpit dashboard. The
+	// current.json file is a per-workspace artifact that lives next to
+	// events.jsonl; aggregate mode skips it (no clear place to put it,
+	// and nothing consumes it from the watch view).
+	WriteCurrentJSON bool
+}
 
-	logPath := filepath.Join(stateHome, "events.jsonl")
-	bellPath := filepath.Join(stateHome, "last_bell_seq")
-	currentPath := filepath.Join(stateHome, "current.json")
-
-	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
-		_ = f.Close()
-	}
-
-	lastBellSeq := loadBellSeq(bellPath, stateHome)
-
+// Run drives the dashboard loop until SIGINT/SIGTERM/SIGHUP/SIGQUIT. The
+// Source supplies one Sample per tick; the loop renders, rings the bell, and
+// (when configured) repaints tmux pane borders.
+func Run(src Source, opts Options) error {
 	fmt.Print("\033[?1049h\033[?25l")
 	defer fmt.Print("\033[?25h\033[?1049l")
 
@@ -42,31 +41,68 @@ func Run(stateHome, workspaceName string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(sigCh)
 
+	notify := resolveNotifier()
+	if notify.describe != "" && notify.describe != "none" {
+		// One-line stderr breadcrumb so the user can tell which backend
+		// resolved without strace'ing the process. Goes to stderr (not
+		// the alt-screen) so it doesn't smear the frame.
+		fmt.Fprintf(os.Stderr, "cc-cockpit: desktop notifications via %s\n", notify.describe)
+	}
+
+	// Seed bell baselines from disk (or current max seq, if first run) so
+	// historical events don't replay on boot. One entry per stateHome.
+	lastBellSeq := make(map[string]int64)
+	if samples, err := src.Sample(); err == nil {
+		for _, s := range samples {
+			lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
+		}
+	}
+
 	var prevFrame string
-	var prevCurrentJSON []byte
+	prevCurrentJSON := make(map[string][]byte)
 	prevPaneColor := make(map[string]string)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		var stageErr string
-		var st state.State
-		data, err := snapshot(stateHome)
+		samples, err := src.Sample()
 		if err != nil {
 			stageErr = "snapshot: " + err.Error()
-		} else {
-			st = state.Reduce(bytes.NewReader(data))
-			if buf, mErr := marshalCurrent(st); mErr == nil && !bytes.Equal(buf, prevCurrentJSON) {
-				writeAtomic(currentPath, buf)
-				prevCurrentJSON = buf
+		}
+
+		// Seed bell baselines for workspaces that appeared after Run started
+		// (a `cc-cockpit open` in another terminal creates a new state dir
+		// mid-watch). Without this we'd ring on the historical backlog.
+		for _, s := range samples {
+			if _, seen := lastBellSeq[s.StateHome]; !seen {
+				lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
 			}
 		}
 
-		body := Render(st, workspaceName, time.Now())
-		frame := body
+		if opts.WriteCurrentJSON {
+			for _, s := range samples {
+				if buf, mErr := marshalCurrent(s.State); mErr == nil {
+					if !bytes.Equal(buf, prevCurrentJSON[s.StateHome]) {
+						writeAtomic(filepath.Join(s.StateHome, "current.json"), buf)
+						prevCurrentJSON[s.StateHome] = buf
+					}
+				}
+			}
+		}
+
+		now := time.Now()
+		var frame string
+		if src.IsMulti() {
+			frame = RenderMulti(samples, src.HeaderName(samples), now)
+		} else if len(samples) > 0 {
+			frame = Render(samples[0].State, src.HeaderName(samples), now)
+		} else {
+			frame = Render(state.State{}, src.HeaderName(samples), now)
+		}
 		if stageErr != "" {
 			frame = "⚠ DASHBOARD STAGE FAILED: " + stageErr + " — displayed state may be stale.\n" +
-				"────────────────────────────────────────────────────────────────\n" + body
+				"────────────────────────────────────────────────────────────────\n" + frame
 		}
 
 		if frame != prevFrame {
@@ -78,16 +114,31 @@ func Run(stateHome, workspaceName string) error {
 			prevFrame = frame
 		}
 
-		if data != nil {
-			info := computeBell(data, lastBellSeq)
+		// Bell + desktop notification. Aggregate NewAttention across
+		// sources so one toast covers a multi-workspace burst.
+		totalAttention := 0
+		var attentionRepo, attentionTask string
+		for _, s := range samples {
+			info := computeBell(s.Raw, lastBellSeq[s.StateHome])
 			if info.NewAttention > 0 {
-				fmt.Print("\a")
+				totalAttention += info.NewAttention
+				if attentionRepo == "" {
+					attentionRepo, attentionTask = pickAttentionLabels(s.State)
+				}
 			}
-			if info.MaxSeq > lastBellSeq {
-				lastBellSeq = info.MaxSeq
-				writeAtomic(bellPath, []byte(strconv.FormatInt(lastBellSeq, 10)+"\n"))
+			if info.MaxSeq > lastBellSeq[s.StateHome] {
+				lastBellSeq[s.StateHome] = info.MaxSeq
+				writeAtomic(filepath.Join(s.StateHome, "last_bell_seq"),
+					[]byte(strconv.FormatInt(info.MaxSeq, 10)+"\n"))
 			}
-			applyPaneBorderColors(st, prevPaneColor)
+		}
+		if totalAttention > 0 {
+			fmt.Print("\a")
+			notify.Notify(buildNotifyMessage(totalAttention, attentionRepo, attentionTask))
+		}
+
+		if opts.ApplyTmuxBorderColors && len(samples) > 0 {
+			applyPaneBorderColors(samples[0].State, prevPaneColor)
 		}
 
 		select {
@@ -98,37 +149,17 @@ func Run(stateHome, workspaceName string) error {
 	}
 }
 
-// snapshot reads events.jsonl into memory under a shared flock on
-// events.lock, so concurrent writers (which hold an exclusive lock) get
-// serialized correctly.
-func snapshot(stateHome string) ([]byte, error) {
-	lockPath := filepath.Join(stateHome, "events.lock")
-	logPath := filepath.Join(stateHome, "events.jsonl")
-	fd, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	defer fd.Close()
-	if err := unix.Flock(int(fd.Fd()), unix.LOCK_SH); err != nil {
-		return nil, err
-	}
-	defer unix.Flock(int(fd.Fd()), unix.LOCK_UN)
-	return os.ReadFile(logPath)
-}
-
-// loadBellSeq seeds from disk on subsequent boots; on first boot, primes
-// from the current max log seq so historical events don't replay.
-func loadBellSeq(bellPath, stateHome string) int64 {
-	if raw, err := os.ReadFile(bellPath); err == nil {
-		if n, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil {
+// loadBellSeq returns the persisted bell baseline for stateHome, falling back
+// to the current max seq in raw (so historical events don't replay on first
+// run). raw may be nil; in that case the baseline is 0.
+func loadBellSeq(stateHome string, raw []byte) int64 {
+	bellPath := filepath.Join(stateHome, "last_bell_seq")
+	if data, err := os.ReadFile(bellPath); err == nil {
+		if n, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64); err == nil {
 			return n
 		}
 	}
-	data, err := snapshot(stateHome)
-	if err != nil {
-		return 0
-	}
-	maxSeq := computeBell(data, 0).MaxSeq
+	maxSeq := computeBell(raw, 0).MaxSeq
 	writeAtomic(bellPath, []byte(strconv.FormatInt(maxSeq, 10)+"\n"))
 	return maxSeq
 }
@@ -164,44 +195,28 @@ func computeBell(data []byte, lastBellSeq int64) bellInfo {
 	return info
 }
 
-// statusToBorderColor maps a session status to a tmux color name. Returns
-// "" for unknown status (caller skips emit). green / yellow / cinzas chosen
-// to give "this needs my attention" pop without screaming the whole grid.
-func statusToBorderColor(status string) string {
-	switch status {
-	case state.StatusRunning:
-		return "green"
-	case state.StatusWaitingInput:
-		return "yellow"
-	case state.StatusIdle:
-		return "colour244"
-	case state.StatusEnded:
-		return "colour240"
+// pickAttentionLabels returns repo/task for the first waiting_input session
+// in st. Used to label the desktop notification. Best-effort: when nothing
+// matches, returns ("", "") and the caller falls back to a generic message.
+func pickAttentionLabels(st state.State) (repo, task string) {
+	for _, s := range st.Sessions {
+		if s.Status == state.StatusWaitingInput {
+			return jsonRawString(s.PrimaryRepo, ""), jsonRawString(s.TaskName, "")
+		}
 	}
-	return ""
+	return "", ""
 }
 
-// applyPaneBorderColors issues `select-pane -P fg=<color>` for each session
-// whose pane border color changed since the last tick. The prev map caches
-// last-emitted color per pane so steady-state ticks issue zero tmux calls.
-// Sessions with null pane_id (fleet/bg agents) are skipped — they don't own
-// a single pane to color.
-func applyPaneBorderColors(st state.State, prev map[string]string) {
-	for _, sess := range st.Sessions {
-		var paneID string
-		if err := json.Unmarshal(sess.PaneID, &paneID); err != nil || paneID == "" {
-			continue
-		}
-		color := statusToBorderColor(sess.Status)
-		if color == "" {
-			continue
-		}
-		if prev[paneID] == color {
-			continue
-		}
-		_ = tmux.SetPaneBorderColor(paneID, color)
-		prev[paneID] = color
+func buildNotifyMessage(count int, repo, task string) string {
+	if count > 1 {
+		return fmt.Sprintf("%d sessions waiting for input", count)
 	}
+	label := strings.TrimSpace(repo + " · " + task)
+	label = strings.Trim(label, "· ")
+	if label == "" {
+		return "session waiting for input"
+	}
+	return label + " waiting for input"
 }
 
 func writeAtomic(path string, data []byte) {
