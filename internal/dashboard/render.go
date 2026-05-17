@@ -23,12 +23,21 @@ const StaleAfter = 15 * time.Minute
 const EndedFooterMaxAge = 24 * time.Hour
 
 // Render produces the dashboard frame for st as of now (single-workspace
-// view: no WS column).
+// view: no WS column). Uses default rendering (no /rename or /color
+// metadata). Callers that want those should use RenderWithMetas.
 func Render(st state.State, workspaceName string, now time.Time) string {
+	return RenderWithMetas(st, workspaceName, now, nil)
+}
+
+// RenderWithMetas is Render plus a sessionId → SessionMeta lookup. When the
+// map carries a Name for a session, it overrides the TASK column. When it
+// carries a Color, the row is wrapped in the matching ANSI escape so the
+// user's /color choice surfaces visually.
+func RenderWithMetas(st state.State, workspaceName string, now time.Time, metas map[string]SessionMeta) string {
 	var b strings.Builder
 	b.WriteString(renderHeader(st, workspaceName))
 	b.WriteString("\n\n")
-	b.WriteString(renderActiveTable(st, now))
+	b.WriteString(renderActiveTable(st, now, metas))
 	if footer := renderEndedFooter(st, now); footer != "" {
 		b.WriteString("\n\n")
 		b.WriteString(footer)
@@ -39,12 +48,18 @@ func Render(st state.State, workspaceName string, now time.Time) string {
 }
 
 // RenderMulti renders aggregated samples for `watch` mode. Adds a WS column
-// and a header that summarizes across all workspaces.
+// and a header that summarizes across all workspaces. Same metas behavior
+// as Render (no metas → default rendering).
 func RenderMulti(samples []TaggedState, title string, now time.Time) string {
+	return RenderMultiWithMetas(samples, title, now, nil)
+}
+
+// RenderMultiWithMetas is RenderMulti plus /rename + /color metadata.
+func RenderMultiWithMetas(samples []TaggedState, title string, now time.Time, metas map[string]SessionMeta) string {
 	var b strings.Builder
 	b.WriteString(renderMultiHeader(samples, title))
 	b.WriteString("\n\n")
-	b.WriteString(renderMultiActiveTable(samples, now))
+	b.WriteString(renderMultiActiveTable(samples, now, metas))
 	if footer := renderMultiEndedFooter(samples, now); footer != "" {
 		b.WriteString("\n\n")
 		b.WriteString(footer)
@@ -107,7 +122,7 @@ func renderMultiHeader(samples []TaggedState, title string) string {
 	return h
 }
 
-func renderActiveTable(st state.State, now time.Time) string {
+func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMeta) string {
 	type row struct {
 		sid  string
 		sess *state.Session
@@ -134,13 +149,14 @@ func renderActiveTable(st state.State, now time.Time) string {
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "STATUS\tSID\tREPO\tTASK\tACT")
-	for _, r := range active {
+	sids := make([]string, len(active))
+	for i, r := range active {
 		s := r.sess
 		// Caps chosen so a worst-case row fits an 80-col dashboard pane after
 		// tabwriter padding: status(9) + sid(8) + repo(18) + task(30) + act(5)
 		// + 4×2 padding = 78, with breathing room for typical content.
 		repo := truncRunes(sessionRepoLabel(s), 18)
-		task := truncRunes(jsonRawString(s.TaskName, "—"), 30)
+		task := truncRunes(sessionTaskLabel(s, metas[r.sid]), 30)
 		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n",
 			glyph(s.Status), shortStatusWithStale(s, now),
 			shortSID(r.sid),
@@ -148,12 +164,13 @@ func renderActiveTable(st state.State, now time.Time) string {
 			task,
 			activitySince(s.LastActivity, now, false),
 		)
+		sids[i] = r.sid
 	}
 	_ = tw.Flush()
-	return strings.TrimRight(b.String(), "\n")
+	return colorizeDataRows(b.String(), sids, metas)
 }
 
-func renderMultiActiveTable(samples []TaggedState, now time.Time) string {
+func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta) string {
 	type row struct {
 		sid  string
 		ws   string
@@ -180,11 +197,12 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time) string {
 	var b strings.Builder
 	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "STATUS\tSID\tWS\tREPO\tTASK\tACT")
-	for _, r := range active {
+	sids := make([]string, len(active))
+	for i, r := range active {
 		s := r.sess
 		ws := truncRunes(r.ws, 12)
 		repo := truncRunes(sessionRepoLabel(s), 16)
-		task := truncRunes(jsonRawString(s.TaskName, "—"), 26)
+		task := truncRunes(sessionTaskLabel(s, metas[r.sid]), 26)
 		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\t%s\n",
 			glyph(s.Status), shortStatusWithStale(s, now),
 			shortSID(r.sid),
@@ -193,9 +211,10 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time) string {
 			task,
 			activitySince(s.LastActivity, now, false),
 		)
+		sids[i] = r.sid
 	}
 	_ = tw.Flush()
-	return strings.TrimRight(b.String(), "\n")
+	return colorizeDataRows(b.String(), sids, metas)
 }
 
 func renderEndedFooter(st state.State, now time.Time) string {
@@ -405,6 +424,42 @@ func truncRunes(s string, n int) string {
 // jsonRawString unwraps a json.RawMessage of either string or null. The
 // reducer stores per-session fields this way to faithfully copy whatever
 // the payload had.
+// sessionTaskLabel returns the TASK column value, honoring `/rename` when
+// the user has set a name for this session. Falls back to the cc-cockpit
+// task_name from SessionStart, then to "—".
+func sessionTaskLabel(s *state.Session, meta SessionMeta) string {
+	if meta.Name != "" {
+		return meta.Name
+	}
+	return jsonRawString(s.TaskName, "—")
+}
+
+// colorizeDataRows post-processes the tabwriter-formatted table by wrapping
+// each data row in the ANSI escape from /color. Header + ended-footer lines
+// are untouched. sids must be in the same order as the rendered data rows.
+//
+// Coloring happens AFTER tabwriter so the escapes don't disturb column
+// width calculations — tabwriter measures plain bytes, ANSI is invisible
+// terminal-side, so injecting escapes around already-aligned lines keeps
+// the layout intact.
+func colorizeDataRows(table string, sids []string, metas map[string]SessionMeta) string {
+	if metas == nil {
+		return strings.TrimRight(table, "\n")
+	}
+	lines := strings.Split(strings.TrimRight(table, "\n"), "\n")
+	// lines[0] is the header; lines[1:] are data rows aligned 1:1 with sids.
+	for i, sid := range sids {
+		idx := i + 1
+		if idx >= len(lines) {
+			break
+		}
+		if ansi := ansiForColor(metas[sid].Color); ansi != "" {
+			lines[idx] = ansi + lines[idx] + ansiReset
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // sessionRepoLabel returns the display label for a session's REPO column.
 // Explicit primary_repo wins (set by `cc-cockpit start`); otherwise we fall
 // back to the basename of cwd so interactive `claude` sessions (no env, no

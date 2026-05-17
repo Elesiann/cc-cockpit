@@ -434,6 +434,44 @@ func TestEndedFooter_StableAcrossSubMinuteTicks(t *testing.T) {
 	}
 }
 
+func TestSessionTaskLabel_NameOverridesTaskName(t *testing.T) {
+	s := &state.Session{TaskName: json.RawMessage(`"original task"`)}
+	got := sessionTaskLabel(s, SessionMeta{Name: "my-rename"})
+	if got != "my-rename" {
+		t.Errorf("got %q, want my-rename (meta.Name wins)", got)
+	}
+}
+
+func TestSessionTaskLabel_NoMetaFallsBackToTaskName(t *testing.T) {
+	s := &state.Session{TaskName: json.RawMessage(`"original task"`)}
+	got := sessionTaskLabel(s, SessionMeta{})
+	if got != "original task" {
+		t.Errorf("got %q, want original task", got)
+	}
+}
+
+func TestRenderWithMetas_AppliesNameAndColor(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	st := state.State{
+		Sessions: map[string]*state.Session{
+			"abcd1234": sessAt("running", "2026-05-17T11:59:50Z", "2026-05-17T11:59:55Z", "api", "old task"),
+		},
+	}
+	metas := map[string]SessionMeta{
+		"abcd1234": {Name: "renamed", Color: "red"},
+	}
+	frame := RenderWithMetas(st, "ws", now, metas)
+	if !strings.Contains(frame, "renamed") {
+		t.Errorf("expected `renamed` in TASK column, got:\n%s", frame)
+	}
+	if strings.Contains(frame, "old task") {
+		t.Errorf("original task_name should be overridden, still present:\n%s", frame)
+	}
+	if !strings.Contains(frame, "\033[31m") || !strings.Contains(frame, "\033[0m") {
+		t.Errorf("expected ANSI red wrap on data row, got:\n%s", frame)
+	}
+}
+
 func TestSessionRepoLabel_PrimaryRepoWins(t *testing.T) {
 	s := &state.Session{
 		PrimaryRepo: json.RawMessage(`"api"`),

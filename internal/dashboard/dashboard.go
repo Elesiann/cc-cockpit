@@ -41,6 +41,7 @@ func Run(src Source, opts Options) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(sigCh)
 
+	home, _ := os.UserHomeDir()
 	notify := resolveNotifier()
 	if notify.describe != "" && notify.describe != "none" {
 		// One-line stderr breadcrumb so the user can tell which backend
@@ -92,13 +93,14 @@ func Run(src Source, opts Options) error {
 		}
 
 		now := time.Now()
+		metas := LoadSessionMetas(home)
 		var frame string
 		if src.IsMulti() {
-			frame = RenderMulti(samples, src.HeaderName(samples), now)
+			frame = RenderMultiWithMetas(samples, src.HeaderName(samples), now, metas)
 		} else if len(samples) > 0 {
-			frame = Render(samples[0].State, src.HeaderName(samples), now)
+			frame = RenderWithMetas(samples[0].State, src.HeaderName(samples), now, metas)
 		} else {
-			frame = Render(state.State{}, src.HeaderName(samples), now)
+			frame = RenderWithMetas(state.State{}, src.HeaderName(samples), now, metas)
 		}
 		if stageErr != "" {
 			frame = "⚠ DASHBOARD STAGE FAILED: " + stageErr + " — displayed state may be stale.\n" +
