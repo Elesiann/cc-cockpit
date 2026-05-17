@@ -43,8 +43,8 @@ func TestRender_HeaderCounts(t *testing.T) {
 	if !strings.Contains(first, "active=3") {
 		t.Errorf("header active count: %q", first)
 	}
-	if !strings.Contains(first, "▶1") || !strings.Contains(first, "●1") || !strings.Contains(first, "◯1") {
-		t.Errorf("header per-status glyphs: %q", first)
+	if !strings.Contains(first, "▶ 1") || !strings.Contains(first, "● 1") || !strings.Contains(first, "◯ 1") {
+		t.Errorf("header per-status glyphs (expected space between glyph and digit): %q", first)
 	}
 	if !strings.Contains(first, "ended=1") {
 		t.Errorf("header ended: %q", first)
@@ -88,6 +88,26 @@ func TestRender_NoActive_ShowsHelpfulMessage(t *testing.T) {
 	frame := Render(st, "ws", time.Now())
 	if !strings.Contains(frame, "no active sessions") {
 		t.Errorf("expected helpful message when no active, got %q", frame)
+	}
+	if !strings.Contains(frame, "─── active (0) ───") {
+		t.Errorf("expected section marker even when empty, got %q", frame)
+	}
+}
+
+func TestRender_ActiveSectionMarker_ShowsCount(t *testing.T) {
+	st := state.State{
+		Sessions: map[string]*state.Session{
+			"sid-a": sessAt("running", "2026-05-17T11:59:00Z", "2026-05-17T11:59:30Z", "api", "task-a"),
+			"sid-b": sessAt("idle", "2026-05-17T11:59:01Z", "2026-05-17T11:59:31Z", "web", "task-b"),
+		},
+	}
+	frame := Render(st, "ws", time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC))
+	if !strings.Contains(frame, "─── active (2) ───") {
+		t.Errorf("expected active section marker with count, got:\n%s", frame)
+	}
+	// Data rows should be indented (consistent with ended footer style).
+	if !strings.Contains(frame, "  ▶ ") && !strings.Contains(frame, "  ◯ ") {
+		t.Errorf("expected indented data rows, got:\n%s", frame)
 	}
 }
 

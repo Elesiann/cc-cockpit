@@ -86,7 +86,7 @@ func renderHeader(st state.State, ws string) string {
 			ended++
 		}
 	}
-	h := fmt.Sprintf("── %s ──  active=%d  ▶%d ●%d ◯%d  ended=%d ──",
+	h := fmt.Sprintf("── %s ──  active=%d  ▶ %d  ● %d  ◯ %d  ended=%d ──",
 		truncRunes(ws, 16), active, running, waiting, idle, ended)
 	if st.DroppedEvents > 0 {
 		h += fmt.Sprintf("\n⚠ %d malformed events skipped", st.DroppedEvents)
@@ -114,7 +114,7 @@ func renderMultiHeader(samples []TaggedState, title string) string {
 		}
 		dropped += s.State.DroppedEvents
 	}
-	h := fmt.Sprintf("── %s ──  active=%d  ▶%d ●%d ◯%d  ended=%d ──",
+	h := fmt.Sprintf("── %s ──  active=%d  ▶ %d  ● %d  ◯ %d  ended=%d ──",
 		truncRunes(title, 32), active, running, waiting, idle, ended)
 	if dropped > 0 {
 		h += fmt.Sprintf("\n⚠ %d malformed events skipped", dropped)
@@ -143,21 +143,22 @@ func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMe
 		return active[i].sid < active[j].sid
 	})
 	if len(active) == 0 {
-		return "  (no active sessions — start [<repo>] <task>)"
+		return "─── active (0) ───\n  (no active sessions — start [<repo>] <task>)"
 	}
 
 	var b strings.Builder
+	fmt.Fprintf(&b, "─── active (%d) ───\n", len(active))
 	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "STATUS\tSID\tREPO\tTASK\tACT")
+	fmt.Fprintln(tw, "  STATUS\tSID\tREPO\tTASK\tACT")
 	sids := make([]string, len(active))
 	for i, r := range active {
 		s := r.sess
 		// Caps chosen so a worst-case row fits an 80-col dashboard pane after
-		// tabwriter padding: status(9) + sid(8) + repo(18) + task(30) + act(5)
-		// + 4×2 padding = 78, with breathing room for typical content.
+		// tabwriter padding: indent(2) + status(9) + sid(8) + repo(18) + task(30) +
+		// act(5) + 4×2 padding = 80, with breathing room for typical content.
 		repo := truncRunes(sessionRepoLabel(s), 18)
 		task := truncRunes(sessionTaskLabel(s, metas[r.sid]), 30)
-		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "  %s %s\t%s\t%s\t%s\t%s\n",
 			glyph(s.Status), shortStatusWithStale(s, now),
 			shortSID(r.sid),
 			repo,
@@ -167,7 +168,7 @@ func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMe
 		sids[i] = r.sid
 	}
 	_ = tw.Flush()
-	return colorizeDataRows(b.String(), sids, metas)
+	return colorizeDataRowsWithHeader(b.String(), sids, metas)
 }
 
 func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta) string {
@@ -191,19 +192,20 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 		return active[i].sid < active[j].sid
 	})
 	if len(active) == 0 {
-		return "  (no active sessions across any workspace)"
+		return "─── active (0) ───\n  (no active sessions across any workspace)"
 	}
 
 	var b strings.Builder
+	fmt.Fprintf(&b, "─── active (%d) ───\n", len(active))
 	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "STATUS\tSID\tWS\tREPO\tTASK\tACT")
+	fmt.Fprintln(tw, "  STATUS\tSID\tWS\tREPO\tTASK\tACT")
 	sids := make([]string, len(active))
 	for i, r := range active {
 		s := r.sess
 		ws := truncRunes(r.ws, 12)
 		repo := truncRunes(sessionRepoLabel(s), 16)
 		task := truncRunes(sessionTaskLabel(s, metas[r.sid]), 26)
-		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "  %s %s\t%s\t%s\t%s\t%s\t%s\n",
 			glyph(s.Status), shortStatusWithStale(s, now),
 			shortSID(r.sid),
 			ws,
@@ -214,7 +216,7 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 		sids[i] = r.sid
 	}
 	_ = tw.Flush()
-	return colorizeDataRows(b.String(), sids, metas)
+	return colorizeDataRowsWithHeader(b.String(), sids, metas)
 }
 
 func renderEndedFooter(st state.State, now time.Time) string {
@@ -435,21 +437,21 @@ func sessionTaskLabel(s *state.Session, meta SessionMeta) string {
 }
 
 // colorizeDataRows post-processes the tabwriter-formatted table by wrapping
-// each data row in the ANSI escape from /color. Header + ended-footer lines
-// are untouched. sids must be in the same order as the rendered data rows.
+// each data row in the ANSI escape from /color. preambleLines is the count
+// of non-data lines at the top (section markers + tabwriter header).
+// sids must be in the same order as the rendered data rows.
 //
 // Coloring happens AFTER tabwriter so the escapes don't disturb column
 // width calculations — tabwriter measures plain bytes, ANSI is invisible
 // terminal-side, so injecting escapes around already-aligned lines keeps
 // the layout intact.
-func colorizeDataRows(table string, sids []string, metas map[string]SessionMeta) string {
+func colorizeDataRows(table string, sids []string, metas map[string]SessionMeta, preambleLines int) string {
 	if metas == nil {
 		return strings.TrimRight(table, "\n")
 	}
 	lines := strings.Split(strings.TrimRight(table, "\n"), "\n")
-	// lines[0] is the header; lines[1:] are data rows aligned 1:1 with sids.
 	for i, sid := range sids {
-		idx := i + 1
+		idx := i + preambleLines
 		if idx >= len(lines) {
 			break
 		}
@@ -458,6 +460,12 @@ func colorizeDataRows(table string, sids []string, metas map[string]SessionMeta)
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// colorizeDataRowsWithHeader assumes a 2-line preamble: the section marker
+// (`─── active (N) ───`) followed by the tabwriter column header.
+func colorizeDataRowsWithHeader(table string, sids []string, metas map[string]SessionMeta) string {
+	return colorizeDataRows(table, sids, metas, 2)
 }
 
 // sessionRepoLabel returns the display label for a session's REPO column.

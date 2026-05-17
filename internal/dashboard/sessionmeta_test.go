@@ -97,7 +97,7 @@ func TestColorizeDataRows_OnlyDataLinesWrapped(t *testing.T) {
 		"sid-a": {Color: "red"},
 		"sid-c": {Color: "blue"},
 	}
-	out := colorizeDataRows(table, sids, metas)
+	out := colorizeDataRows(table, sids, metas, 1)
 	lines := splitLines(out)
 	if len(lines) != 4 {
 		t.Fatalf("expected 4 lines, got %d: %q", len(lines), out)
@@ -122,7 +122,7 @@ func TestColorizeDataRows_OnlyDataLinesWrapped(t *testing.T) {
 
 func TestColorizeDataRows_NilMetas_NoOp(t *testing.T) {
 	table := "STATUS  SID\n▶  aaa\n▶  bbb"
-	out := colorizeDataRows(table, []string{"sid-a", "sid-b"}, nil)
+	out := colorizeDataRows(table, []string{"sid-a", "sid-b"}, nil, 1)
 	if out != "STATUS  SID\n▶  aaa\n▶  bbb" {
 		t.Errorf("nil metas should leave table untouched, got %q", out)
 	}
