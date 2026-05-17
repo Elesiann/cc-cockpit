@@ -292,6 +292,46 @@ func TestRender_SingleWorkspaceHasNoWSColumn(t *testing.T) {
 	}
 }
 
+func TestEndedAgo_MinutePrecisionAndLessThanOneMinute(t *testing.T) {
+	now := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		iso  string
+		want string
+	}{
+		{"2026-04-21T11:59:59Z", "<1m ago"}, // 1s
+		{"2026-04-21T11:59:30Z", "<1m ago"}, // 30s
+		{"2026-04-21T11:59:00Z", "1m ago"},  // exactly 1m
+		{"2026-04-21T11:55:00Z", "5m ago"},
+		{"2026-04-21T11:00:00Z", "1h ago"},
+		{"2026-04-20T12:00:00Z", "24h ago"},
+		{"", "—"},
+		{"not-a-date", "—"},
+	}
+	for _, c := range cases {
+		got := endedAgo(c.iso, now)
+		if got != c.want {
+			t.Errorf("endedAgo(%q) = %q, want %q", c.iso, got, c.want)
+		}
+	}
+}
+
+func TestEndedFooter_StableAcrossSubMinuteTicks(t *testing.T) {
+	// Two ticks 500ms apart on an ended-15s-ago session must produce the
+	// same frame — that's the whole point of this fix (no per-second
+	// repaints triggered by ended rows).
+	t0 := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
+	st := state.State{Sessions: map[string]*state.Session{}}
+	s := sessAt("ended", "2026-04-21T11:59:45Z", "2026-04-21T11:59:45Z", "api", "task")
+	s.EndedAt = json.RawMessage(`"2026-04-21T11:59:45Z"`)
+	st.Sessions["a"] = s
+
+	f0 := Render(st, "ws", t0)
+	f1 := Render(st, "ws", t0.Add(500*time.Millisecond))
+	if f0 != f1 {
+		t.Errorf("ended footer should be stable within a minute; diff:\n--- t0 ---\n%s\n--- t0+500ms ---\n%s", f0, f1)
+	}
+}
+
 func TestSessionRepoLabel_PrimaryRepoWins(t *testing.T) {
 	s := &state.Session{
 		PrimaryRepo: json.RawMessage(`"api"`),

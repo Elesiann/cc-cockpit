@@ -235,7 +235,7 @@ func renderEndedFooter(st state.State, now time.Time) string {
 			shortSID(r.sid),
 			jsonRawString(r.sess.PrimaryRepo, "—"),
 			jsonRawString(r.sess.TaskName, "—"),
-			activitySince(when, now, true),
+			endedAgo(when, now),
 		)
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -281,7 +281,7 @@ func renderMultiEndedFooter(samples []TaggedState, now time.Time) string {
 			truncRunes(r.ws, 12),
 			jsonRawString(r.sess.PrimaryRepo, "—"),
 			jsonRawString(r.sess.TaskName, "—"),
-			activitySince(when, now, true),
+			endedAgo(when, now),
 		)
 	}
 	return strings.TrimRight(b.String(), "\n")
@@ -432,4 +432,32 @@ func activitySince(iso string, now time.Time, suffix bool) string {
 		s += " ago"
 	}
 	return s
+}
+
+// endedAgo formats an "N ago" string for ended-session rows at minute
+// precision. Ended sessions don't move, so re-rendering "30s ago → 31s ago"
+// every dashboard tick is pure noise: it forces a full frame repaint each
+// second without changing meaningful state. Snapping to whole minutes (and
+// "<1m ago" for the first 60s) means an ended row only triggers a repaint
+// when it crosses a minute boundary.
+func endedAgo(iso string, now time.Time) string {
+	if iso == "" {
+		return "—"
+	}
+	t, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return "—"
+	}
+	d := now.Sub(t)
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return "<1m ago"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	}
 }
