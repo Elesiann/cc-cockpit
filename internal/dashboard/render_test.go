@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -289,6 +290,107 @@ func TestRender_SingleWorkspaceHasNoWSColumn(t *testing.T) {
 	headerLine := strings.Split(frame, "\n")[2]
 	if strings.Contains(headerLine, "\tWS\t") || strings.Contains(headerLine, " WS ") {
 		t.Errorf("single Render should not include WS column, got header: %q", headerLine)
+	}
+}
+
+func TestEndedFooter_StableSortAcrossEqualEndedAt(t *testing.T) {
+	// Two ended sessions share the same EndedAt (e.g. both reaped in the
+	// same wall-clock second). Without the sid tiebreaker, map iteration
+	// randomness would flip their order between renders. Test asserts
+	// deterministic ordering by sid.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	tEq := "2026-05-17T11:50:00Z" // 10m ago
+	st := state.State{Sessions: map[string]*state.Session{}}
+	for _, sid := range []string{"zzz999", "aaa111", "mmm555"} {
+		s := sessAt("ended", tEq, tEq, "repo", "task-"+sid)
+		s.EndedAt = json.RawMessage(`"` + tEq + `"`)
+		st.Sessions[sid] = s
+	}
+	// Render 10 times; collect SID column order from each frame's ended rows.
+	var firstSeen []string
+	for i := 0; i < 10; i++ {
+		frame := Render(st, "ws", now)
+		var order []string
+		for _, line := range strings.Split(frame, "\n") {
+			if strings.HasPrefix(line, "  ◼ ") {
+				// "  ◼ zzz999..." → split on whitespace, take field 1 (the sid).
+				parts := strings.Fields(line)
+				if len(parts) > 1 {
+					order = append(order, parts[1])
+				}
+			}
+		}
+		if i == 0 {
+			firstSeen = order
+			continue
+		}
+		if !reflect.DeepEqual(order, firstSeen) {
+			t.Errorf("ended order drifted on tick %d: first=%v this=%v", i, firstSeen, order)
+		}
+	}
+	// Confirm the deterministic order is sid-ascending (aaa, mmm, zzz).
+	want := []string{"aaa111", "mmm555", "zzz999"}
+	if !reflect.DeepEqual(firstSeen, want) {
+		t.Errorf("expected sid-asc tiebreaker order %v, got %v", want, firstSeen)
+	}
+}
+
+func TestMultiEndedFooter_StableSortAcrossEqualEndedAt(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	tEq := "2026-05-17T11:50:00Z"
+	mk := func(sid string) *state.Session {
+		s := sessAt("ended", tEq, tEq, "repo", "t")
+		s.EndedAt = json.RawMessage(`"` + tEq + `"`)
+		return s
+	}
+	samples := []TaggedState{
+		{
+			Name: "alpha",
+			State: state.State{
+				Sessions: map[string]*state.Session{
+					"zzz999": mk("zzz999"),
+					"aaa111": mk("aaa111"),
+				},
+			},
+		},
+	}
+	var firstSeen string
+	for i := 0; i < 10; i++ {
+		frame := RenderMulti(samples, "watch", now)
+		if i == 0 {
+			firstSeen = frame
+			continue
+		}
+		if frame != firstSeen {
+			t.Errorf("multi ended-footer frame drifted on tick %d", i)
+		}
+	}
+}
+
+func TestWatchFooter_HasExpectedCheatsheetEntries(t *testing.T) {
+	// The watch footer doubles as the operator's cheatsheet. Assert each
+	// listed verb is present so renames have to update the test (and the
+	// docs in lockstep).
+	footer := renderWatchFooter()
+	wants := []string{
+		"end <prefix>",
+		"end all-non-ended --yes",
+		"reap [--older-than DUR]",
+		"open ",
+		"close <ws> --yes",
+		"Ctrl-C",
+		"legend: `?` after status",
+	}
+	for _, w := range wants {
+		if !strings.Contains(footer, w) {
+			t.Errorf("watch footer missing %q\nFooter:\n%s", w, footer)
+		}
+	}
+	// Every line ≤ 80 cols (dashboard pane width contract).
+	for i, line := range strings.Split(footer, "\n") {
+		if len(line) > 80 {
+			t.Errorf("watch footer line %d > 80 cols (%d): %q", i, len(line), line)
+		}
 	}
 }
 

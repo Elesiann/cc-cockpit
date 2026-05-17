@@ -118,8 +118,14 @@ func renderActiveTable(st state.State, now time.Time) string {
 			active = append(active, row{sid, s})
 		}
 	}
+	// Tiebreaker on sid so two sessions started in the same second don't
+	// swap places between ticks (Go map iteration is randomized; sort.Slice
+	// is not stable).
 	sort.Slice(active, func(i, j int) bool {
-		return active[i].sess.StartedAt < active[j].sess.StartedAt
+		if active[i].sess.StartedAt != active[j].sess.StartedAt {
+			return active[i].sess.StartedAt < active[j].sess.StartedAt
+		}
+		return active[i].sid < active[j].sid
 	})
 	if len(active) == 0 {
 		return "  (no active sessions — start [<repo>] <task>)"
@@ -219,7 +225,14 @@ func renderEndedFooter(st state.State, now time.Time) string {
 	if len(ended) == 0 {
 		return ""
 	}
-	sort.Slice(ended, func(i, j int) bool { return ended[i].sortKey > ended[j].sortKey })
+	// Tiebreaker on sid for stable ordering when two sessions share EndedAt
+	// (e.g. `reap` ending several in the same wall-clock second).
+	sort.Slice(ended, func(i, j int) bool {
+		if ended[i].sortKey != ended[j].sortKey {
+			return ended[i].sortKey > ended[j].sortKey
+		}
+		return ended[i].sid < ended[j].sid
+	})
 	if len(ended) > 3 {
 		ended = ended[:3]
 	}
@@ -264,7 +277,13 @@ func renderMultiEndedFooter(samples []TaggedState, now time.Time) string {
 	if len(ended) == 0 {
 		return ""
 	}
-	sort.Slice(ended, func(i, j int) bool { return ended[i].sortKey > ended[j].sortKey })
+	// Tiebreaker on sid keeps order stable when two sessions share EndedAt.
+	sort.Slice(ended, func(i, j int) bool {
+		if ended[i].sortKey != ended[j].sortKey {
+			return ended[i].sortKey > ended[j].sortKey
+		}
+		return ended[i].sid < ended[j].sid
+	})
 	if len(ended) > 3 {
 		ended = ended[:3]
 	}
@@ -304,12 +323,18 @@ func renderCommandsFooter() string {
 }
 
 // renderWatchFooter is the cheatsheet for `cc-cockpit watch` — read-only
-// viewer with no control pane, so the help text differs.
+// viewer with no control pane. Lists the verbs that work from any terminal
+// (no cockpit env required) plus the exit hint and the `?` legend.
 func renderWatchFooter() string {
 	return strings.Join([]string{
-		"─── watch (read-only) ───",
-		"  shows every cc-cockpit workspace at once. `?` = no activity 15m+ (possibly crashed).",
-		"  Ctrl-C to exit. Use `cc-cockpit open` in a workspace to interact.",
+		"─── commands ─── (in any terminal, prefix `cc-cockpit`)",
+		"  end <prefix>               end a session (any workspace)",
+		"  end all-non-ended --yes    nuke every non-ended session",
+		"  reap [--older-than DUR]    sweep stale sessions (default: idle > 1h)",
+		"  open                       open the cockpit for cwd's workspace",
+		"  close <ws> --yes           kill a workspace's cockpit",
+		"  Ctrl-C                     exit watch",
+		"  legend: `?` after status = no activity 15m+ (possibly crashed)",
 	}, "\n")
 }
 
