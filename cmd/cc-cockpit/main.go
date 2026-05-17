@@ -30,7 +30,7 @@ import (
 // Version is the binary's reported version. Overridden at release time via:
 //
 //	go build -ldflags="-X main.Version=<tag>"
-var Version = "0.5.0"
+var Version = "0.5.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -58,6 +58,8 @@ func main() {
 		os.Exit(runInstall(args))
 	case "open":
 		os.Exit(runOpen(args))
+	case "close":
+		os.Exit(runClose(args))
 	case "start":
 		os.Setenv("CC_COCKPIT_CMD_NAME", "start")
 		os.Exit(runSpawn(args))
@@ -80,6 +82,7 @@ Subcommands:
   init                create .cc-cockpit/workspace.json
   doctor              check install + workspace health
   open                open the cockpit (launches tmux with dashboard + control)
+  close [<ws>]        close the cockpit (kill the workspace's tmux session); --all kills every cockpit session
   start [<repo>] <task>   open a Claude pane in repos[<repo>] running the given task (repo auto-detected from cwd if inside a repo)
   start-fleet <repo> ...  open an Agent View pane scoped to repos[<repo>] (multi-agent)
   end <prefix>            end a session (synthetic SessionEnd) and close its tmux pane
@@ -633,6 +636,7 @@ fi
 alias start='cc-cockpit start'
 alias start-fleet='cc-cockpit start-fleet'
 alias end='cc-cockpit end'
+alias close='cc-cockpit close'
 alias doctor='cc-cockpit doctor'
 `
 
@@ -721,6 +725,113 @@ func runOpen(args []string) int {
 		}
 		die("open", "tmux: %v", err)
 	}
+	return 0
+}
+
+// ---------- close ----------
+
+func runClose(args []string) int {
+	var killAll, yes bool
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch a {
+		case "--all":
+			killAll = true
+		case "--yes", "-y":
+			yes = true
+		default:
+			if strings.HasPrefix(a, "-") {
+				die("close", "unknown flag %q", a)
+			}
+			positional = append(positional, a)
+		}
+	}
+	if killAll && len(positional) > 0 {
+		die("close", "--all does not take a workspace argument")
+	}
+	if len(positional) > 1 {
+		die("close", "expected at most one workspace argument")
+	}
+
+	if killAll {
+		sessions := tmux.ListSessions()
+		if len(sessions) == 0 {
+			fmt.Println("close: no cockpit sessions running")
+			return 0
+		}
+		if !yes {
+			fmt.Fprintf(os.Stderr, "close: would kill %d cockpit session(s):\n", len(sessions))
+			for _, s := range sessions {
+				fmt.Fprintf(os.Stderr, "  - %s\n", s)
+			}
+			die("close", "re-run with --yes to confirm")
+		}
+		if err := tmux.KillServer(); err != nil {
+			die("close", "kill-server: %v", err)
+		}
+		fmt.Printf("close: killed cockpit server (%d session(s))\n", len(sessions))
+		return 0
+	}
+
+	// Single-workspace flow. Discover the name from (in priority order):
+	// explicit positional, COCKPIT_WORKSPACE_NAME env (set when run from
+	// inside the cockpit), then walk up cwd to a workspace.json.
+	var wsName string
+	switch {
+	case len(positional) == 1:
+		wsName = positional[0]
+	case os.Getenv("COCKPIT_WORKSPACE_NAME") != "":
+		wsName = os.Getenv("COCKPIT_WORKSPACE_NAME")
+	default:
+		cwd, err := os.Getwd()
+		if err != nil {
+			die("close", "cannot determine cwd: %v", err)
+		}
+		root := workspace.FindRoot(cwd)
+		if root == "" {
+			die("close", "not inside a workspace and no name given; run 'cc-cockpit close <workspace>' or 'cc-cockpit close --all'")
+		}
+		ws, err := workspace.Load(root)
+		if err != nil {
+			die("close", "workspace.json: %v", err)
+		}
+		wsName = ws.Name
+	}
+
+	if !tmux.HasSession(wsName) {
+		fmt.Printf("close: workspace %q has no live tmux session\n", wsName)
+		return 0
+	}
+
+	if !yes {
+		// Best-effort: count live (non-ended) sessions so the operator knows
+		// what they're about to terminate. Falls back to a generic prompt if
+		// state can't be read.
+		liveCount := -1
+		stateHome := hook.ComputeStateHome(homeDir(), os.Getenv, wsName)
+		if f, err := os.Open(filepath.Join(stateHome, "events.jsonl")); err == nil {
+			st := state.Reduce(f)
+			_ = f.Close()
+			liveCount = 0
+			for _, s := range st.Sessions {
+				if s.Status != state.StatusEnded {
+					liveCount++
+				}
+			}
+		}
+		if liveCount >= 0 {
+			fmt.Fprintf(os.Stderr, "close: about to close cockpit %q (%d live session(s) will be terminated)\n", wsName, liveCount)
+		} else {
+			fmt.Fprintf(os.Stderr, "close: about to close cockpit %q\n", wsName)
+		}
+		die("close", "re-run with --yes to confirm")
+	}
+
+	if err := tmux.KillSession(wsName); err != nil {
+		die("close", "kill-session: %v", err)
+	}
+	fmt.Printf("close: killed cockpit session %q\n", wsName)
 	return 0
 }
 

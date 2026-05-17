@@ -132,6 +132,39 @@ func KillPane(paneID string) error {
 	return cmd("kill-pane", "-t", paneID).Run()
 }
 
+// KillSession kills one cockpit session by name. tmux's pane-exited hook
+// fires for each pane on the way down, so synthetic SessionEnd events still
+// land in events.jsonl.
+func KillSession(name string) error {
+	if name == "" {
+		return nil
+	}
+	return cmd("kill-session", "-t", name).Run()
+}
+
+// KillServer tears down the entire private cc-cockpit tmux server — every
+// workspace session goes with it. Used by `cc-cockpit close --all`.
+func KillServer() error {
+	return cmd("kill-server").Run()
+}
+
+// ListSessions returns the names of every session on the private cockpit
+// server. Returns nil when the server isn't running (tmux exits non-zero
+// with no server) — the empty list is the meaningful answer.
+func ListSessions() []string {
+	out, err := cmd("list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			names = append(names, line)
+		}
+	}
+	return names
+}
+
 // SetPaneBorderColor sets the foreground (border + title) color of one pane,
 // overriding the server-wide pane-border-style. Used by the dashboard loop
 // to signal session status at a glance (green=running, yellow=waiting, etc).

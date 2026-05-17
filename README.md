@@ -159,6 +159,8 @@ The end is not final. If the matched session was actually still live (no real pa
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create `.cc-cockpit/workspace.json`; with no repo specs, auto-discovers child git repos. |
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
+| `cc-cockpit close [<workspace>] [--yes]` | Kill the workspace's tmux session (closes the cockpit). Discovers the workspace from `$COCKPIT_WORKSPACE_NAME` if run from inside, else walks up cwd. Requires `--yes` to confirm the live sessions about to die. |
+| `cc-cockpit close --all [--yes]` | Kill the entire cc-cockpit tmux server (every workspace at once). |
 | `cc-cockpit start [<repo>] <task...>` | Open a new pane below the dashboard, running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. The `<repo>` arg can be omitted when the shell's cwd is inside a known repo — cc-cockpit picks the longest-prefix match. |
 | `cc-cockpit start-fleet <repo> [name...]` | Open an Agent View pane scoped to `repos[<repo>]` — one pane, many background agents dispatched from inside the TUI. Optional `name` becomes the pane label suffix (`fleet · <repo>: <name>`). Each agent shows up as its own dashboard row. |
 | `cc-cockpit end <sid-prefix> [--yes]` | Mark a session ended (synthetic `SessionEnd`) and close its tmux pane. **Not final**: if the session was actually still live (e.g. a fleet-dispatched background agent with no pane to close), any later event from it (prompt, tool use, notification) brings it back. Prefixes that match more than one session require `--yes`. |
@@ -214,6 +216,7 @@ Everything else is consequences of those five points.
 
 **Everything broken, reset hard:**
 ```bash
+cc-cockpit close --all --yes                  # kill any live cockpit tmux session(s)
 rm -rf ~/.local/state/cc-cockpit/<workspace-name>/
 # next `cc-cockpit open` starts clean
 ```

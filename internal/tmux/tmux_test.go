@@ -41,6 +41,15 @@ func TestSplitControlArgs_UsesProvidedControlCmd(t *testing.T) {
 	}
 }
 
+func TestKillSessionCmd(t *testing.T) {
+	got := cmd("kill-session", "-t", "ws").Args
+	// Args[0] is "tmux"; we only assert on the trailing tmux args.
+	want := []string{"tmux", "-L", Server, "kill-session", "-t", "ws"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v\nwant %v", got, want)
+	}
+}
+
 func TestSetPaneBorderColorArgs(t *testing.T) {
 	got := setPaneBorderColorArgs("%42", "yellow")
 	want := []string{"select-pane", "-t", "%42", "-P", "fg=yellow"}
