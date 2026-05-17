@@ -121,6 +121,33 @@ func TestRender_EndedFooter_ShowsLastThree(t *testing.T) {
 	}
 }
 
+func TestRender_EndedFooter_DropsAncient(t *testing.T) {
+	// Three sessions ended: one 2h ago (fresh), one 23h ago (still in window),
+	// one 25h ago (past EndedFooterMaxAge → must drop). Expected footer rows: 2.
+	now := time.Date(2026, 4, 21, 12, 0, 0, 0, time.UTC)
+	st := state.State{Sessions: map[string]*state.Session{}}
+	cases := []struct {
+		key string
+		ts  string
+	}{
+		{"a", "2026-04-21T10:00:00Z"}, // 2h ago
+		{"b", "2026-04-20T13:00:00Z"}, // 23h ago
+		{"c", "2026-04-20T11:00:00Z"}, // 25h ago → drop
+	}
+	for _, c := range cases {
+		s := sessAt("ended", c.ts, c.ts, "r", "t")
+		s.EndedAt = json.RawMessage(`"` + c.ts + `"`)
+		st.Sessions[c.key] = s
+	}
+	frame := Render(st, "ws", now)
+	if !strings.Contains(frame, "ended (last 2)") {
+		t.Errorf("expected 'ended (last 2)' (one drop), got: %q", frame)
+	}
+	if got := strings.Count(frame, "◼"); got != 2 {
+		t.Errorf("expected 2 ended-footer rows, got %d", got)
+	}
+}
+
 func TestRender_ShortSID_TruncatesTo8(t *testing.T) {
 	if got := shortSID("abcdef0123456789"); got != "abcdef01" {
 		t.Errorf("shortSID 16-char: got %q, want abcdef01", got)

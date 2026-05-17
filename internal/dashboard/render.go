@@ -17,6 +17,11 @@ import (
 // idle/waiting_input are already "nothing happening" states.
 const StaleAfter = 15 * time.Minute
 
+// EndedFooterMaxAge drops ended-session rows older than this from the
+// "ended (last N)" footer so the dashboard doesn't keep day-old corpses
+// in view. The full history is still preserved in events.jsonl.
+const EndedFooterMaxAge = 24 * time.Hour
+
 // Render produces the dashboard frame for st as of now (single-workspace
 // view: no WS column).
 func Render(st state.State, workspaceName string, now time.Time) string {
@@ -201,6 +206,13 @@ func renderEndedFooter(st state.State, now time.Time) string {
 		key := jsonRawString(s.EndedAt, "")
 		if key == "" {
 			key = s.LastActivity
+		}
+		// Drop ancient endings. Parseable timestamps older than the cap go;
+		// unparseable timestamps fall through (better visible than silenced).
+		if t, err := time.Parse(time.RFC3339, key); err == nil {
+			if now.Sub(t) > EndedFooterMaxAge {
+				continue
+			}
 		}
 		ended = append(ended, row{sid, s, key})
 	}

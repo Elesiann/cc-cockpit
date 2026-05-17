@@ -30,7 +30,7 @@ import (
 // Version is the binary's reported version. Overridden at release time via:
 //
 //	go build -ldflags="-X main.Version=<tag>"
-var Version = "0.6.1"
+var Version = "0.6.2"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -48,6 +48,8 @@ func main() {
 		os.Exit(runDoctor(args))
 	case "end":
 		os.Exit(runEnd(args))
+	case "reap":
+		os.Exit(runReap(args))
 	case "hook":
 		os.Exit(runHook(args))
 	case "dashboard":
@@ -88,7 +90,8 @@ Subcommands:
   watch               headless dashboard: aggregate every workspace's sessions in any terminal
   start [<repo>] <task>   open a Claude pane in repos[<repo>] running the given task (repo auto-detected from cwd if inside a repo)
   start-fleet <repo> ...  open an Agent View pane scoped to repos[<repo>] (multi-agent)
-  end <prefix>            end a session (synthetic SessionEnd) and close its tmux pane
+  end <prefix>            end a session (synthetic SessionEnd) and close its tmux pane; works from any terminal (scans all workspaces if outside the cockpit)
+  reap [--older-than DUR] sweep all workspaces, end every non-ended session whose last activity is older than DUR (default: 1h)
   hook <Event>        internal: ingest a Claude Code hook payload
   dashboard           internal: render the dashboard pane (loop until SIGTERM)
   reduce              read events.jsonl on stdin, write reduced state JSON to stdout
@@ -327,7 +330,77 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-// ---------- mark-ended ----------
+// ---------- end / reap ----------
+
+// endTarget is one (workspace stateHome, session_id, session) triple
+// selected for synthetic SessionEnd emission.
+type endTarget struct {
+	stateHome string
+	sid       string
+	sess      *state.Session
+}
+
+// collectEndTargets walks the relevant state dirs and returns active sessions
+// where predicate(sid, sess) is true. When scope is non-empty, only that one
+// stateHome is scanned (used by `end` from inside a cockpit). Otherwise every
+// dir under the cc-cockpit state root containing an events.jsonl is scanned —
+// enabling `end` and `reap` to run from any terminal across all workspaces.
+func collectEndTargets(scope string, predicate func(string, *state.Session) bool) []endTarget {
+	var dirs []string
+	if scope != "" {
+		dirs = []string{scope}
+	} else {
+		root := dashboard.DefaultStateRoot(homeDir(), os.Getenv)
+		matches, _ := filepath.Glob(filepath.Join(root, "*", "events.jsonl"))
+		for _, m := range matches {
+			dirs = append(dirs, filepath.Dir(m))
+		}
+	}
+	var targets []endTarget
+	for _, sh := range dirs {
+		f, err := os.Open(filepath.Join(sh, "events.jsonl"))
+		if err != nil {
+			continue
+		}
+		st := state.Reduce(f)
+		_ = f.Close()
+		for sid, sess := range st.Sessions {
+			if sess.Status == state.StatusEnded {
+				continue
+			}
+			if predicate(sid, sess) {
+				targets = append(targets, endTarget{sh, sid, sess})
+			}
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].stateHome != targets[j].stateHome {
+			return targets[i].stateHome < targets[j].stateHome
+		}
+		return targets[i].sid < targets[j].sid
+	})
+	return targets
+}
+
+// applyEndTargets emits a synthetic SessionEnd per target and attempts a
+// tmux kill-pane when the session has a known PaneID. tmux failures are
+// ignored: a non-existent pane (or no tmux server at all when run outside
+// the cockpit) is a benign no-op for `end`/`reap`.
+func applyEndTargets(cmdName, reason string, targets []endTarget) {
+	for _, t := range targets {
+		if err := appendSyntheticEnd(t.stateHome, t.sid, reason); err != nil {
+			die(cmdName, "append to %s: %v", t.stateHome, err)
+		}
+		ws := filepath.Base(t.stateHome)
+		fmt.Printf("  ended: [%s] %s\n", ws, t.sid)
+		var paneID string
+		if err := json.Unmarshal(t.sess.PaneID, &paneID); err == nil && paneID != "" {
+			if err := tmux.KillPane(paneID); err == nil {
+				fmt.Printf("    closed pane %s\n", paneID)
+			}
+		}
+	}
+}
 
 func runEnd(args []string) int {
 	// Hand-parse so --yes/-y can appear anywhere (Go's flag pkg stops at the
@@ -353,61 +426,103 @@ func runEnd(args []string) int {
 	}
 	prefix := posArgs[0]
 
-	stateHome := os.Getenv("COCKPIT_STATE_HOME")
-	if stateHome == "" {
-		die("end", "COCKPIT_STATE_HOME not set (run inside 'cc-cockpit open')")
+	scope := os.Getenv("COCKPIT_STATE_HOME") // "" → aggregate across all workspaces
+	predicate := func(sid string, _ *state.Session) bool {
+		return prefix == "all-non-ended" || strings.HasPrefix(sid, prefix)
 	}
-
-	f, err := os.Open(filepath.Join(stateHome, "events.jsonl"))
-	if err != nil {
-		die("end", "no events.jsonl in %s", stateHome)
-	}
-	st := state.Reduce(f)
-	_ = f.Close()
-
-	var targets []string
-	for sid, sess := range st.Sessions {
-		if sess.Status == state.StatusEnded {
-			continue
-		}
-		if prefix == "all-non-ended" || strings.HasPrefix(sid, prefix) {
-			targets = append(targets, sid)
-		}
-	}
-	sort.Strings(targets)
+	targets := collectEndTargets(scope, predicate)
 
 	if len(targets) == 0 {
-		fmt.Printf("end: no matching non-ended sessions for %q\n", prefix)
+		if scope == "" {
+			fmt.Printf("end: no matching non-ended sessions for %q across any workspace\n", prefix)
+		} else {
+			fmt.Printf("end: no matching non-ended sessions for %q\n", prefix)
+		}
 		return 0
 	}
 
 	if len(targets) > 1 && !yes {
 		fmt.Fprintf(os.Stderr, "end: would end %d session(s):\n", len(targets))
-		for _, sid := range targets {
-			fmt.Fprintf(os.Stderr, "  - %s\n", sid)
+		for _, t := range targets {
+			fmt.Fprintf(os.Stderr, "  - [%s] %s\n", filepath.Base(t.stateHome), t.sid)
 		}
 		die("end", "re-run with --yes to confirm (or give a more specific prefix)")
 	}
 
-	for _, sid := range targets {
-		if err := appendSyntheticEnd(stateHome, sid, "operator-dismissed"); err != nil {
-			die("end", "append: %v", err)
-		}
-		fmt.Printf("  ended: %s\n", sid)
-		// Close the tmux pane if we know one. Fleet/bg sessions have pane_id
-		// null — skip them (operator can't single-out one bg agent's "pane").
-		// Ignore errors: a pane that died between Reduce and now is a benign
-		// race. The pane-exited hook that fires next will be a no-op because
-		// the synthetic end we just wrote already marks the session ended.
-		var paneID string
-		if err := json.Unmarshal(st.Sessions[sid].PaneID, &paneID); err == nil && paneID != "" {
-			if err := tmux.KillPane(paneID); err == nil {
-				fmt.Printf("    closed pane %s\n", paneID)
-			}
-		}
-	}
+	applyEndTargets("end", "operator-dismissed", targets)
 	fmt.Printf("end: %d session(s) ended (any later event un-ends).\n", len(targets))
 	return 0
+}
+
+func runReap(args []string) int {
+	olderThan := time.Hour // default: 1h
+	var yes, dryRun bool
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch a {
+		case "--yes", "-y":
+			yes = true
+		case "--dry-run", "-n":
+			dryRun = true
+		case "--older-than":
+			if i+1 >= len(args) {
+				die("reap", "--older-than requires a value (e.g. 30m, 2h)")
+			}
+			d, err := time.ParseDuration(args[i+1])
+			if err != nil {
+				die("reap", "invalid duration %q: %v", args[i+1], err)
+			}
+			if d <= 0 {
+				die("reap", "--older-than must be positive (got %s)", d)
+			}
+			olderThan = d
+			i++
+		default:
+			die("reap", "unknown argument %q (use --older-than DUR, --dry-run, --yes)", a)
+		}
+	}
+
+	scope := os.Getenv("COCKPIT_STATE_HOME") // "" → aggregate
+	now := time.Now()
+	predicate := func(_ string, sess *state.Session) bool {
+		// LastActivity is an RFC3339 string set by the reducer on every event.
+		// Sessions with malformed/empty timestamps are conservatively skipped.
+		t, err := time.Parse(time.RFC3339, sess.LastActivity)
+		if err != nil {
+			return false
+		}
+		return now.Sub(t) > olderThan
+	}
+	targets := collectEndTargets(scope, predicate)
+
+	if len(targets) == 0 {
+		fmt.Printf("reap: no sessions older than %s\n", olderThan)
+		return 0
+	}
+
+	if dryRun || !yes {
+		fmt.Fprintf(os.Stderr, "reap: would end %d session(s) older than %s:\n", len(targets), olderThan)
+		for _, t := range targets {
+			age := now.Sub(parseActivityOrZero(t.sess.LastActivity)).Round(time.Minute)
+			fmt.Fprintf(os.Stderr, "  - [%s] %s  (idle %s)\n", filepath.Base(t.stateHome), t.sid, age)
+		}
+		if dryRun {
+			return 0
+		}
+		die("reap", "re-run with --yes to confirm")
+	}
+
+	applyEndTargets("reap", "stale-reaped", targets)
+	fmt.Printf("reap: %d session(s) reaped (idle > %s).\n", len(targets), olderThan)
+	return 0
+}
+
+func parseActivityOrZero(iso string) time.Time {
+	t, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // ---------- hook ----------
@@ -659,6 +774,7 @@ fi
 alias start='cc-cockpit start'
 alias start-fleet='cc-cockpit start-fleet'
 alias end='cc-cockpit end'
+alias reap='cc-cockpit reap'
 alias close='cc-cockpit close'
 alias doctor='cc-cockpit doctor'
 `
