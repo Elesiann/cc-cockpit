@@ -8,6 +8,13 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/workspace"
 )
 
+// GlobalWorkspaceName is the synthetic workspace name used as the catch-all
+// state dir for Claude sessions that aren't tracked by an explicit workspace
+// (interactive sessions outside any workspace tree, ad-hoc `claude --print`,
+// etc). The leading underscore disqualifies it from workspace.ValidSlug so it
+// can never collide with a real user-defined workspace name.
+const GlobalWorkspaceName = "_global"
+
 // Resolver resolves a session_id to the events.jsonl sink (stateHome) and
 // pane_id. All I/O is injected so the routing logic is unit-testable.
 type Resolver struct {
@@ -20,15 +27,20 @@ type Resolver struct {
 	Sleep     func(time.Duration)
 }
 
-// Resolve returns ("", "") to silently drop. Otherwise stateHome is the
-// events.jsonl parent dir and paneID is the TMUX_PANE for cockpit-spawned
-// sessions, "" for Agent View (no tmux pane).
-func (r *Resolver) Resolve(sid string) (stateHome, paneID string) {
-	// Agent View detection takes precedence over the env-var fast path.
-	// If a user runs `claude --bg` from inside a cockpit pane, the
-	// supervisor inherits COCKPIT_SESSION_ACTIVE / COCKPIT_STATE_HOME and
-	// leaks them to later sessions dispatched from anywhere; checking
-	// state.json first anchors routing to the session's own cwd.
+// Resolve returns the events.jsonl parent dir and pane_id for one hook
+// invocation. payloadCwd is the `cwd` field from the Claude hook payload
+// (may be ""). stateHome is never empty — sessions that don't match a real
+// workspace land in the synthetic GlobalWorkspaceName dir so `watch` can see
+// every Claude session the user runs, regardless of how it was started.
+//
+// Routing priority:
+//  1. Agent View (state.json under ~/.claude/jobs/<sid>/) — anchors by the
+//     session's own originCwd to defeat env-var leakage from a parent pane.
+//  2. Cockpit-spawned (COCKPIT_SESSION_ACTIVE env) — uses COCKPIT_STATE_HOME.
+//  3. Interactive — walks up payloadCwd to find a workspace.json ancestor.
+//  4. Global fallback — synthetic _global workspace.
+func (r *Resolver) Resolve(sid, payloadCwd string) (stateHome, paneID string) {
+	// Branch 1: Agent View (state.json present).
 	statePath := filepath.Join(r.HomeDir, ".claude", "jobs", sid, "state.json")
 	var data []byte
 	for i := 0; i < 3; i++ {
@@ -45,31 +57,58 @@ func (r *Resolver) Resolve(sid string) (stateHome, paneID string) {
 			Cwd       string `json:"cwd"`
 		}
 		if json.Unmarshal(data, &js) == nil {
-			cwd := js.OriginCwd
-			if cwd == "" {
-				cwd = js.Cwd
+			agentCwd := js.OriginCwd
+			if agentCwd == "" {
+				agentCwd = js.Cwd
 			}
-			if cwd != "" {
-				if real, err := r.EvalLinks(cwd); err == nil {
-					cwd = real
-				}
-				if root := r.FindRoot(cwd); root != "" {
-					if ws, err := r.LoadWS(root); err == nil && ws.Name != "" {
-						return ComputeStateHome(r.HomeDir, r.Getenv, ws.Name), ""
-					}
-				}
+			if sh := r.routeByCwd(agentCwd); sh != "" {
+				return sh, ""
 			}
 		}
-		return "", ""
+		// Agent View outside any workspace → global. Intentionally skip the
+		// env-var fast path here: env vars may have leaked from a parent
+		// cockpit pane and would misroute this session.
+		return r.globalStateHome(), ""
 	}
 
-	// Env-var fast path: a true cockpit-spawned `claude` session.
+	// Branch 2: cockpit-spawned (env-var fast path).
 	if r.Getenv("COCKPIT_SESSION_ACTIVE") == "1" {
 		if sh := r.Getenv("COCKPIT_STATE_HOME"); sh != "" {
 			return sh, r.Getenv("TMUX_PANE")
 		}
 	}
-	return "", ""
+
+	// Branch 3: interactive session — route by the payload's cwd.
+	if sh := r.routeByCwd(payloadCwd); sh != "" {
+		return sh, ""
+	}
+
+	// Branch 4: global fallback.
+	return r.globalStateHome(), ""
+}
+
+// routeByCwd returns the stateHome for the workspace.json ancestor of cwd,
+// or "" if cwd is empty or has no workspace ancestor.
+func (r *Resolver) routeByCwd(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	if real, err := r.EvalLinks(cwd); err == nil {
+		cwd = real
+	}
+	root := r.FindRoot(cwd)
+	if root == "" {
+		return ""
+	}
+	ws, err := r.LoadWS(root)
+	if err != nil || ws.Name == "" {
+		return ""
+	}
+	return ComputeStateHome(r.HomeDir, r.Getenv, ws.Name)
+}
+
+func (r *Resolver) globalStateHome() string {
+	return ComputeStateHome(r.HomeDir, r.Getenv, GlobalWorkspaceName)
 }
 
 // ComputeStateHome mirrors the path formula used in runOpen so both call

@@ -3,6 +3,7 @@ package dashboard
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -127,7 +128,7 @@ func renderActiveTable(st state.State, now time.Time) string {
 		// Caps chosen so a worst-case row fits an 80-col dashboard pane after
 		// tabwriter padding: status(9) + sid(8) + repo(18) + task(30) + act(5)
 		// + 4×2 padding = 78, with breathing room for typical content.
-		repo := truncRunes(jsonRawString(s.PrimaryRepo, "—"), 18)
+		repo := truncRunes(sessionRepoLabel(s), 18)
 		task := truncRunes(jsonRawString(s.TaskName, "—"), 30)
 		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\n",
 			glyph(s.Status), shortStatusWithStale(s, now),
@@ -171,7 +172,7 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time) string {
 	for _, r := range active {
 		s := r.sess
 		ws := truncRunes(r.ws, 12)
-		repo := truncRunes(jsonRawString(s.PrimaryRepo, "—"), 16)
+		repo := truncRunes(sessionRepoLabel(s), 16)
 		task := truncRunes(jsonRawString(s.TaskName, "—"), 26)
 		fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%s\t%s\n",
 			glyph(s.Status), shortStatusWithStale(s, now),
@@ -367,6 +368,22 @@ func truncRunes(s string, n int) string {
 // jsonRawString unwraps a json.RawMessage of either string or null. The
 // reducer stores per-session fields this way to faithfully copy whatever
 // the payload had.
+// sessionRepoLabel returns the display label for a session's REPO column.
+// Explicit primary_repo wins (set by `cc-cockpit start`); otherwise we fall
+// back to the basename of cwd so interactive `claude` sessions (no env, no
+// task name) still get a meaningful identifier instead of "—".
+func sessionRepoLabel(s *state.Session) string {
+	if r := jsonRawString(s.PrimaryRepo, ""); r != "" {
+		return r
+	}
+	if c := jsonRawString(s.Cwd, ""); c != "" {
+		if base := filepath.Base(c); base != "" && base != "." && base != "/" {
+			return base
+		}
+	}
+	return "—"
+}
+
 func jsonRawString(raw json.RawMessage, fallback string) string {
 	if len(raw) == 0 || string(raw) == "null" {
 		return fallback

@@ -55,11 +55,18 @@ func statePath(home string) string {
 	return filepath.Join(home, ".claude", "jobs", sid, "state.json")
 }
 
-func TestResolve_NoStateNoEnv_Drops(t *testing.T) {
+func globalSH(home string) string {
+	return filepath.Join(home, ".local", "state", "cc-cockpit", GlobalWorkspaceName)
+}
+
+func TestResolve_NoStateNoEnvNoCwd_FallsBackToGlobal(t *testing.T) {
 	f := &fixture{homeDir: "/home/u", env: map[string]string{}}
-	sh, pane := f.resolver().Resolve(sid)
-	if sh != "" || pane != "" {
-		t.Fatalf("expected drop, got stateHome=%q paneID=%q", sh, pane)
+	sh, pane := f.resolver().Resolve(sid, "")
+	if sh != globalSH("/home/u") {
+		t.Fatalf("expected global stateHome, got %q", sh)
+	}
+	if pane != "" {
+		t.Fatalf("paneID should be empty for global, got %q", pane)
 	}
 	if f.sleeps != 3 {
 		t.Fatalf("expected 3 retry sleeps, got %d", f.sleeps)
@@ -75,7 +82,7 @@ func TestResolve_NoStateWithEnv_UsesEnvVars(t *testing.T) {
 			"TMUX_PANE":              "%42",
 		},
 	}
-	sh, pane := f.resolver().Resolve(sid)
+	sh, pane := f.resolver().Resolve(sid, "")
 	if sh != "/state/ws-a" {
 		t.Fatalf("expected env stateHome, got %q", sh)
 	}
@@ -94,7 +101,7 @@ func TestResolve_AgentView_OriginCwdInsideWorkspace(t *testing.T) {
 		roots:   map[string]string{"/home/u/work/repo": "/home/u/work"},
 		wsNames: map[string]string{"/home/u/work": "work-ws"},
 	}
-	sh, pane := f.resolver().Resolve(sid)
+	sh, pane := f.resolver().Resolve(sid, "")
 	want := "/xdg/cc-cockpit/work-ws"
 	if sh != want {
 		t.Fatalf("stateHome: got %q want %q", sh, want)
@@ -114,14 +121,17 @@ func TestResolve_AgentView_FallsBackToCwdWhenOriginMissing(t *testing.T) {
 		roots:   map[string]string{"/home/u/work/repo": "/home/u/work"},
 		wsNames: map[string]string{"/home/u/work": "work-ws"},
 	}
-	sh, _ := f.resolver().Resolve(sid)
+	sh, _ := f.resolver().Resolve(sid, "")
 	want := "/home/u/.local/state/cc-cockpit/work-ws"
 	if sh != want {
 		t.Fatalf("stateHome: got %q want %q", sh, want)
 	}
 }
 
-func TestResolve_AgentView_OutsideAnyWorkspace_Drops(t *testing.T) {
+func TestResolve_AgentView_OutsideAnyWorkspace_RoutesToGlobal(t *testing.T) {
+	// Agent View session whose declared cwd isn't inside any workspace tree.
+	// Previously this dropped silently; now it routes to the synthetic _global
+	// workspace so `cc-cockpit watch` can still see it.
 	f := &fixture{
 		homeDir: "/home/u",
 		env:     map[string]string{},
@@ -130,9 +140,36 @@ func TestResolve_AgentView_OutsideAnyWorkspace_Drops(t *testing.T) {
 		},
 		// no roots entry → FindRoot returns ""
 	}
-	sh, pane := f.resolver().Resolve(sid)
-	if sh != "" || pane != "" {
-		t.Fatalf("expected drop, got stateHome=%q paneID=%q", sh, pane)
+	sh, pane := f.resolver().Resolve(sid, "")
+	if sh != globalSH("/home/u") {
+		t.Fatalf("expected global stateHome, got %q", sh)
+	}
+	if pane != "" {
+		t.Fatalf("paneID should be empty, got %q", pane)
+	}
+}
+
+func TestResolve_AgentView_OutsideAnyWorkspace_IgnoresEnvVarLeak(t *testing.T) {
+	// Even when env vars are set (leaked from a parent cockpit pane), an Agent
+	// View session whose own cwd is outside any workspace must route to
+	// _global — not to the leaked workspace.
+	f := &fixture{
+		homeDir: "/home/u",
+		env: map[string]string{
+			"COCKPIT_SESSION_ACTIVE": "1",
+			"COCKPIT_STATE_HOME":     "/state/ws-LEAKED",
+			"TMUX_PANE":              "%99",
+		},
+		files: map[string][]byte{
+			statePath("/home/u"): []byte(`{"originCwd":"/tmp/scratch"}`),
+		},
+	}
+	sh, pane := f.resolver().Resolve(sid, "")
+	if sh != globalSH("/home/u") {
+		t.Fatalf("env-var leak through Agent View branch: got %q", sh)
+	}
+	if pane != "" {
+		t.Fatalf("paneID should be empty, got %q", pane)
 	}
 }
 
@@ -153,7 +190,7 @@ func TestResolve_AgentViewWinsOverEnvVars(t *testing.T) {
 		roots:   map[string]string{"/home/u/work/repo": "/home/u/work"},
 		wsNames: map[string]string{"/home/u/work": "work-ws"},
 	}
-	sh, pane := f.resolver().Resolve(sid)
+	sh, pane := f.resolver().Resolve(sid, "")
 	want := "/home/u/.local/state/cc-cockpit/work-ws"
 	if sh != want {
 		t.Fatalf("env-var leak: stateHome=%q want %q", sh, want)
@@ -181,13 +218,73 @@ func TestResolve_RetryCoversLateStateWrite(t *testing.T) {
 		}
 		return []byte(`{"originCwd":"/home/u/work/repo"}`), nil
 	}
-	sh, _ := r.Resolve(sid)
+	sh, _ := r.Resolve(sid, "")
 	want := "/home/u/.local/state/cc-cockpit/work-ws"
 	if sh != want {
 		t.Fatalf("retry: stateHome=%q want %q (attempts=%d)", sh, want, attempts)
 	}
 	if attempts != 3 {
 		t.Fatalf("expected 3 read attempts, got %d", attempts)
+	}
+}
+
+func TestResolve_InteractiveCwd_RoutesToWorkspaceAncestor(t *testing.T) {
+	// The headline case for 0.6.1: a vanilla `claude` started in a directory
+	// whose ancestor has a workspace.json. No state.json, no env vars.
+	f := &fixture{
+		homeDir: "/home/u",
+		env:     map[string]string{},
+		roots:   map[string]string{"/home/u/projects/api": "/home/u/projects"},
+		wsNames: map[string]string{"/home/u/projects": "projects-ws"},
+	}
+	sh, pane := f.resolver().Resolve(sid, "/home/u/projects/api")
+	want := "/home/u/.local/state/cc-cockpit/projects-ws"
+	if sh != want {
+		t.Fatalf("stateHome: got %q want %q", sh, want)
+	}
+	if pane != "" {
+		t.Fatalf("paneID should be empty (no env), got %q", pane)
+	}
+}
+
+func TestResolve_InteractiveCwd_NoWorkspaceAncestor_FallsBackToGlobal(t *testing.T) {
+	// claude run in /tmp or anywhere without a workspace.json ancestor lands
+	// in _global so `watch` still sees it.
+	f := &fixture{
+		homeDir: "/home/u",
+		env:     map[string]string{},
+		// no roots entry for /tmp/anywhere → FindRoot returns ""
+	}
+	sh, pane := f.resolver().Resolve(sid, "/tmp/anywhere")
+	if sh != globalSH("/home/u") {
+		t.Fatalf("expected global stateHome, got %q", sh)
+	}
+	if pane != "" {
+		t.Fatalf("paneID should be empty, got %q", pane)
+	}
+}
+
+func TestResolve_EnvVarBeatsPayloadCwd(t *testing.T) {
+	// A cockpit-spawned session has both COCKPIT_SESSION_ACTIVE and a
+	// payload cwd that might or might not match a workspace. The env vars
+	// are authoritative (they encode the exact stateHome runOpen prepared).
+	f := &fixture{
+		homeDir: "/home/u",
+		env: map[string]string{
+			"COCKPIT_SESSION_ACTIVE": "1",
+			"COCKPIT_STATE_HOME":     "/state/ws-from-env",
+			"TMUX_PANE":              "%7",
+		},
+		// Even if cwd resolves to a different workspace, env wins.
+		roots:   map[string]string{"/home/u/elsewhere": "/home/u"},
+		wsNames: map[string]string{"/home/u": "ws-from-cwd"},
+	}
+	sh, pane := f.resolver().Resolve(sid, "/home/u/elsewhere")
+	if sh != "/state/ws-from-env" {
+		t.Fatalf("env should win: got stateHome=%q", sh)
+	}
+	if pane != "%7" {
+		t.Fatalf("env paneID lost: got %q", pane)
 	}
 }
 

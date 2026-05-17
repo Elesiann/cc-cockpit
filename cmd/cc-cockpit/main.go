@@ -30,7 +30,7 @@ import (
 // Version is the binary's reported version. Overridden at release time via:
 //
 //	go build -ldflags="-X main.Version=<tag>"
-var Version = "0.6.0"
+var Version = "0.6.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -441,6 +441,7 @@ func runHook(args []string) int {
 	if sid == "" {
 		return 0
 	}
+	cwd, _ := payload["cwd"].(string)
 
 	resolver := &hook.Resolver{
 		HomeDir:   homeDir(),
@@ -451,7 +452,7 @@ func runHook(args []string) int {
 		LoadWS:    workspace.Load,
 		Sleep:     time.Sleep,
 	}
-	stateHome, paneID := resolver.Resolve(sid)
+	stateHome, paneID := resolver.Resolve(sid, cwd)
 	if stateHome == "" {
 		return 0
 	}

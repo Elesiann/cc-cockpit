@@ -123,9 +123,9 @@ For a glanceable view without booting the cockpit, run:
 cc-cockpit watch
 ```
 
-`watch` opens a read-only dashboard in the current terminal that aggregates **every** cc-cockpit-tracked workspace into a single table — no tmux, no control pane, no `init`. It scans `~/.local/state/cc-cockpit/*/events.jsonl` (or `$XDG_STATE_HOME/cc-cockpit/...`) and shows one row per non-ended session, with an extra `WS` column so workspaces are easy to distinguish.
+`watch` opens a read-only dashboard in the current terminal that aggregates **every** active Claude session into a single table — no tmux, no control pane, no `init`. Sessions are routed by cwd: ones inside a `workspace.json` ancestor land in that workspace's state dir; everything else (interactive `claude` in `/tmp`, ad-hoc shell calls) lands in a synthetic `_global` dir. `watch` scans all of them under `~/.local/state/cc-cockpit/*/events.jsonl` (or `$XDG_STATE_HOME/cc-cockpit/...`) and shows one row per non-ended session, with an extra `WS` column so workspaces are easy to distinguish.
 
-Useful when you have several `cc-cockpit open` cockpits across different parents of your filesystem, or when sessions are dispatched by Agent View / `claude --bg` and you just want one screen that shows them all.
+**You don't need to "set up" anything**: with the hooks installed (`cc-cockpit install`), open `cc-cockpit watch` in any terminal, then start a `claude` session in any other terminal — it appears within one tick. Sessions without a `primary_repo` (interactive ones) show the basename of their cwd in the REPO column.
 
 - **Stale flag:** a `running` session with no events for 15 minutes renders as `running?` (probably crashed mid-turn). Cockpit-spawned sessions already get a synthetic `SessionEnd` from the tmux `pane-exited` hook; this is the headless equivalent.
 - **Desktop notifications:** when a session enters `waiting_input`, `watch` also calls `wsl-notify-send.exe` / `notify-send` / `osascript` (whichever resolves on PATH) so you don't miss the bell on Windows Terminal under WSL2. At boot it prints which backend was chosen to stderr.

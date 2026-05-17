@@ -265,6 +265,36 @@ func TestRender_SingleWorkspaceHasNoWSColumn(t *testing.T) {
 	}
 }
 
+func TestSessionRepoLabel_PrimaryRepoWins(t *testing.T) {
+	s := &state.Session{
+		PrimaryRepo: json.RawMessage(`"api"`),
+		Cwd:         json.RawMessage(`"/home/u/elsewhere"`),
+	}
+	if got := sessionRepoLabel(s); got != "api" {
+		t.Errorf("got %q, want api", got)
+	}
+}
+
+func TestSessionRepoLabel_FallsBackToCwdBasename(t *testing.T) {
+	s := &state.Session{
+		PrimaryRepo: json.RawMessage(`""`),
+		Cwd:         json.RawMessage(`"/home/u/projects/api"`),
+	}
+	if got := sessionRepoLabel(s); got != "api" {
+		t.Errorf("got %q, want api (from cwd basename)", got)
+	}
+}
+
+func TestSessionRepoLabel_NullEverything_ReturnsDash(t *testing.T) {
+	s := &state.Session{
+		PrimaryRepo: json.RawMessage("null"),
+		Cwd:         json.RawMessage("null"),
+	}
+	if got := sessionRepoLabel(s); got != "—" {
+		t.Errorf("got %q, want em-dash", got)
+	}
+}
+
 func TestJsonRawString_NullFallsBack(t *testing.T) {
 	if got := jsonRawString(json.RawMessage("null"), "—"); got != "—" {
 		t.Errorf("null should fall back: got %q", got)
