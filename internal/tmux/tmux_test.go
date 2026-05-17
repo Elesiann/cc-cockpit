@@ -18,12 +18,23 @@ func TestNewSessionArgs(t *testing.T) {
 	}
 }
 
-func TestSplitControlArgs(t *testing.T) {
+func TestSplitControlArgs_DefaultsToBareBash(t *testing.T) {
 	got := splitControlArgs("ws", []string{"FOO=bar"})
 	want := []string{
 		"split-window", "-h", "-t", "ws:0",
 		"-e", "FOO=bar",
 		"bash",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v\nwant %v", got, want)
+	}
+}
+
+func TestSplitControlArgs_UsesProvidedControlCmd(t *testing.T) {
+	got := splitControlArgs("ws", nil, "bash", "--rcfile", "/x/control.bashrc")
+	want := []string{
+		"split-window", "-h", "-t", "ws:0",
+		"bash", "--rcfile", "/x/control.bashrc",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v\nwant %v", got, want)

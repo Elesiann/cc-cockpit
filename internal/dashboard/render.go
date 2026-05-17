@@ -66,7 +66,7 @@ func renderActiveTable(st state.State, now time.Time) string {
 		return active[i].sess.StartedAt < active[j].sess.StartedAt
 	})
 	if len(active) == 0 {
-		return "  (no active sessions — cc-cockpit start <repo> <task>)"
+		return "  (no active sessions — start <repo> <task>)"
 	}
 
 	var b strings.Builder
@@ -135,14 +135,17 @@ func renderEndedFooter(st state.State, now time.Time) string {
 
 // renderCommandsFooter prints a stable cheatsheet so a first-time user
 // knows the commands and where to run them (the "control" pane, not
-// here). Kept short — four lines — so it never pushes the table off
-// screen on a normal terminal height.
+// here). Kept short so it never pushes the table off screen on a normal
+// terminal height. Command names are the bash aliases the control pane
+// installs at open time (see controlBashrc in cmd/cc-cockpit/main.go) —
+// type the short form, no `cc-cockpit` prefix needed.
 func renderCommandsFooter() string {
 	return strings.Join([]string{
 		"─── commands ─── (run them in the \"control\" pane →)",
-		"  cc-cockpit start <repo> <task>   spawn a Claude session",
-		"  cc-cockpit mark-ended <prefix>   dismiss a stuck session",
-		"  Ctrl-b d                         detach (sessions persist)",
+		"  start <repo> <task>        spawn a Claude session",
+		"  start-fleet <repo> [name]  open an Agent View pane (multi-agent)",
+		"  mark-ended <prefix>        dismiss a stuck session",
+		"  Ctrl-b d                   detach (sessions persist)",
 	}, "\n")
 }
 

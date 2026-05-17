@@ -30,7 +30,7 @@ import (
 // Version is the binary's reported version. Overridden at release time via:
 //
 //	go build -ldflags="-X main.Version=<tag>"
-var Version = "0.4.0"
+var Version = "0.4.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -85,7 +85,7 @@ Subcommands:
   open                open the cockpit (launches tmux with dashboard + control)
   start <repo> ...    open a Claude pane in repos[<repo>] running the given task
   spawn <repo> ...    alias for start
-  start-fleet <repo>  open an Agent View pane scoped to repos[<repo>] (multi-agent)
+  start-fleet <repo> ...  open an Agent View pane scoped to repos[<repo>] (multi-agent)
   mark-ended          dismiss stale sessions (synthetic SessionEnd)
   hook <Event>        internal: ingest a Claude Code hook payload
   dashboard           internal: render the dashboard pane (loop until SIGTERM)
@@ -606,6 +606,24 @@ func runInstall(args []string) int {
 // closes, and we want the lock held until tmux exits.
 var liveLockFd *os.File
 
+// controlBashrc is written to <stateHome>/control.bashrc on each `open` and
+// passed as `bash --rcfile` to the control pane. Sources the user's normal
+// ~/.bashrc first so PS1/history/completions are preserved, then layers the
+// cc-cockpit verb aliases so users can type `start api fix bug` instead of
+// `cc-cockpit start api fix bug`. Aliases are scoped to this bash; other
+// shells on the system are unaffected.
+const controlBashrc = `# cc-cockpit control pane shell init (auto-generated).
+if [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+
+alias start='cc-cockpit start'
+alias spawn='cc-cockpit spawn'
+alias start-fleet='cc-cockpit start-fleet'
+alias mark-ended='cc-cockpit mark-ended'
+alias doctor='cc-cockpit doctor'
+`
+
 func runOpen(args []string) int {
 	if len(args) > 0 {
 		die("open", "unexpected arguments: %v", args)
@@ -644,6 +662,11 @@ func runOpen(args []string) int {
 		die("open", "cannot create state dir %q: %v", stateHome, err)
 	}
 
+	rcPath := filepath.Join(stateHome, "control.bashrc")
+	if err := os.WriteFile(rcPath, []byte(controlBashrc), 0o644); err != nil {
+		die("open", "cannot write control rcfile %q: %v", rcPath, err)
+	}
+
 	if err := bindWorkspace(stateHome, canonical, ws.Name); err != nil {
 		die("open", "%v", err)
 	}
@@ -662,7 +685,7 @@ func runOpen(args []string) int {
 		"CC_COCKPIT_WORKSPACE_ROOT=" + canonical,
 	}
 	if !tmux.HasSession(ws.Name) {
-		if err := tmux.NewSession(ws.Name, sessionEnv); err != nil {
+		if err := tmux.NewSession(ws.Name, sessionEnv, "bash", "--rcfile", rcPath); err != nil {
 			die("open", "%v", err)
 		}
 	}
@@ -882,12 +905,10 @@ func runStartFleet(args []string) int {
 		}
 	}
 	if len(positional) == 0 {
-		die(cmdName, "repo required (usage: cc-cockpit %s <repo>)", cmdName)
-	}
-	if len(positional) > 1 {
-		die(cmdName, "unexpected extra args after <repo> (use 'cc-cockpit start' for single-task panes)")
+		die(cmdName, "repo required (usage: cc-cockpit %s <repo> [<name>...])", cmdName)
 	}
 	repo := positional[0]
+	name := strings.Join(positional[1:], " ")
 
 	stateHome := os.Getenv("COCKPIT_STATE_HOME")
 	if stateHome == "" {
@@ -916,6 +937,9 @@ func runStartFleet(args []string) int {
 	}
 
 	paneName := "fleet · " + repo
+	if name != "" {
+		paneName += ": " + name
+	}
 	if len(paneName) > 60 {
 		paneName = paneName[:60]
 	}

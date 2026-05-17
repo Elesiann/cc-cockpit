@@ -124,9 +124,11 @@ The `name` field is the runtime state directory key (must match `^[a-zA-Z0-9][a-
 └───────────────────────────┴────────────────────────────┘
 ```
 
-The dashboard is read-only and auto-updates every 0.5s. The control pane is a regular shell — that's where you run `cc-cockpit start <repo> <task>` to spawn a new Claude session as a pane below the dashboard. Each pane's top border shows `<repo>: <task>` so you can tell them apart at a glance.
+The dashboard is read-only and auto-updates every 0.5s. The control pane is a regular shell — that's where you run `start <repo> <task>` to spawn a new Claude session as a pane below the dashboard. Each pane's top border shows `<repo>: <task>` so you can tell them apart at a glance.
 
-For multi-agent work in one repo, use `cc-cockpit start-fleet <repo>` from the control pane. It opens a single pane (border: `fleet · <repo>`) running [Claude Code's Agent View](https://code.claude.com/docs/en/agent-view) TUI scoped to that repo. Dispatch as many background agents as you want from inside the TUI; each one shows up as its own row on the dashboard.
+For multi-agent work in one repo, use `start-fleet <repo> [name...]` from the control pane. It opens a single pane (border: `fleet · <repo>` — or `fleet · <repo>: <name>` if you pass a name) running [Claude Code's Agent View](https://code.claude.com/docs/en/agent-view) TUI scoped to that repo. Dispatch as many background agents as you want from inside the TUI; each one shows up as its own row on the dashboard.
+
+> The control pane spawns with bash aliases for `start`, `spawn`, `start-fleet`, `mark-ended`, and `doctor` so you can drop the `cc-cockpit` prefix. Your `~/.bashrc` is sourced first, then the aliases are layered on top. The aliases only exist inside the control pane — other shells on your system are untouched.
 
 cc-cockpit uses its own private tmux server (`-L cc-cockpit`), so it never collides with any tmux config you already have. Mouse is on by default: click a pane to focus, drag a border to resize, scroll to enter copy mode. Detach with `Ctrl-b d` (sessions persist — `cc-cockpit open` reattaches).
 
@@ -158,7 +160,7 @@ Dismissal is not final. If the matched session was actually still live, its next
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
 | `cc-cockpit start <repo> <task...>` | Open a new pane below the dashboard, running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. |
-| `cc-cockpit start-fleet <repo>` | Open an Agent View pane scoped to `repos[<repo>]` — one pane, many background agents dispatched from inside the TUI. Each agent shows up as its own dashboard row. |
+| `cc-cockpit start-fleet <repo> [name...]` | Open an Agent View pane scoped to `repos[<repo>]` — one pane, many background agents dispatched from inside the TUI. Optional `name` becomes the pane label suffix (`fleet · <repo>: <name>`). Each agent shows up as its own dashboard row. |
 | `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **not final**: if the session was actually still live, any later event from it (prompt, tool use, notification) brings it back. Prefixes that match more than one session require `--yes`. |
 | `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session. `--yes` required because this always matches multiple sessions. |
 | `cc-cockpit reduce` | (debug) Read `events.jsonl` on stdin, print the reduced state as JSON. Useful for inspecting how the reducer interprets a log. |

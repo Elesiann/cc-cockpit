@@ -25,13 +25,14 @@ func HasSession(name string) bool {
 
 // NewSession creates a detached session with two side-by-side panes:
 // a 60-col dashboard pane on the left running `cc-cockpit dashboard`, and
-// a control pane (bash) on the right. env entries are KEY=VALUE pairs
-// applied to both panes via tmux's -e flag.
-func NewSession(name string, env []string) error {
+// a control pane on the right. env entries are KEY=VALUE pairs applied to
+// both panes via tmux's -e flag. controlCmd is the command (with args) the
+// control pane runs; if empty, defaults to bare `bash`.
+func NewSession(name string, env []string, controlCmd ...string) error {
 	if err := cmd(newSessionArgs(name, env)...).Run(); err != nil {
 		return fmt.Errorf("new-session: %w", err)
 	}
-	if err := cmd(splitControlArgs(name, env)...).Run(); err != nil {
+	if err := cmd(splitControlArgs(name, env, controlCmd...)...).Run(); err != nil {
 		return fmt.Errorf("split-window: %w", err)
 	}
 	// 80 cols on the dashboard pane: standard terminal-width minimum, plus
@@ -156,12 +157,15 @@ func newSessionArgs(name string, env []string) []string {
 	return append(args, "cc-cockpit", "dashboard")
 }
 
-func splitControlArgs(name string, env []string) []string {
+func splitControlArgs(name string, env []string, controlCmd ...string) []string {
 	args := []string{"split-window", "-h", "-t", name + ":0"}
 	for _, kv := range env {
 		args = append(args, "-e", kv)
 	}
-	return append(args, "bash")
+	if len(controlCmd) == 0 {
+		controlCmd = []string{"bash"}
+	}
+	return append(args, controlCmd...)
 }
 
 // serverOptionArgs returns the tmux set-option invocations applied by
