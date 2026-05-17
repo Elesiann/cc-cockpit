@@ -126,7 +126,11 @@ The `name` field is the runtime state directory key (must match `^[a-zA-Z0-9][a-
 
 The dashboard is read-only and auto-updates every 0.5s. The control pane is a regular shell — that's where you run `cc-cockpit start <repo> <task>` to spawn a new Claude session as a pane below the dashboard. Each pane's top border shows `<repo>: <task>` so you can tell them apart at a glance.
 
+For multi-agent work in one repo, use `cc-cockpit start-fleet <repo>` from the control pane. It opens a single pane (border: `fleet · <repo>`) running [Claude Code's Agent View](https://code.claude.com/docs/en/agent-view) TUI scoped to that repo. Dispatch as many background agents as you want from inside the TUI; each one shows up as its own row on the dashboard.
+
 cc-cockpit uses its own private tmux server (`-L cc-cockpit`), so it never collides with any tmux config you already have. Mouse is on by default: click a pane to focus, drag a border to resize, scroll to enter copy mode. Detach with `Ctrl-b d` (sessions persist — `cc-cockpit open` reattaches).
+
+Rows can come from three sources: single-agent panes from `cc-cockpit start`, fleet-pane agents from `cc-cockpit start-fleet`, or background sessions dispatched externally (`claude --bg`, `/bg`, `claude agents`) whose dispatch directory is inside this workspace. Agent View rows have no local pane; interact with them via `claude attach <id>` or the fleet pane.
 
 **Statuses:**
 - `▶ running` — Claude is working (assistant turn or tool execution).
@@ -154,6 +158,7 @@ Dismissal is not final. If the matched session was actually still live, its next
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
 | `cc-cockpit start <repo> <task...>` | Open a new pane below the dashboard, running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. |
+| `cc-cockpit start-fleet <repo>` | Open an Agent View pane scoped to `repos[<repo>]` — one pane, many background agents dispatched from inside the TUI. Each agent shows up as its own dashboard row. |
 | `cc-cockpit mark-ended <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for stale sessions. The dismissal is **not final**: if the session was actually still live, any later event from it (prompt, tool use, notification) brings it back. Prefixes that match more than one session require `--yes`. |
 | `cc-cockpit mark-ended all-non-ended --yes` | Dismiss every currently non-ended session. `--yes` required because this always matches multiple sessions. |
 | `cc-cockpit reduce` | (debug) Read `events.jsonl` on stdin, print the reduced state as JSON. Useful for inspecting how the reducer interprets a log. |
@@ -176,7 +181,7 @@ Dismissal is not final. If the matched session was actually still live, its next
 ## How it works (30-second version)
 
 1. When you `start`, `cc-cockpit` invokes `tmux split-window -v -f -t <session>:0 -e COCKPIT_SESSION_ACTIVE=1 ... claude` on the private `-L cc-cockpit` server, so the Claude session opens as a pane below the dashboard.
-2. The `SessionStart` hook in `~/.claude/settings.json` fires. It is a silent no-op unless `COCKPIT_SESSION_ACTIVE=1`, so cc-cockpit's hooks do not affect Claude sessions started outside the cockpit.
+2. The `SessionStart` hook in `~/.claude/settings.json` fires. cc-cockpit ingests it for two kinds of sessions: ones you started with `cc-cockpit start` (gated by the `COCKPIT_SESSION_ACTIVE=1` env var), and Claude Code Agent View background sessions (`claude --bg`, `/bg`, `claude agents`) whose dispatch directory is inside a cc-cockpit workspace. Anything else is silently dropped.
 3. Every event (`SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`) appends an envelope to `events.jsonl` under an exclusive `flock`. Sequence numbers are monotonic; wall-clock is advisory.
 4. The dashboard pane loops every 0.5s. It snapshots the log under a shared `flock`, runs the reducer in-process to produce `current.json`, renders the frame, and rings the bell on new `waiting_input` sessions.
 5. There is no daemon. No IPC. No database. If the dashboard dies, `events.jsonl` keeps growing. On restart, the reducer rebuilds the state from the log.

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -29,7 +30,7 @@ import (
 // Version is the binary's reported version. Overridden at release time via:
 //
 //	go build -ldflags="-X main.Version=<tag>"
-var Version = "0.3.0"
+var Version = "0.4.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -63,6 +64,9 @@ func main() {
 	case "spawn":
 		os.Setenv("CC_COCKPIT_CMD_NAME", "spawn")
 		os.Exit(runSpawn(args))
+	case "start-fleet":
+		os.Setenv("CC_COCKPIT_CMD_NAME", "start-fleet")
+		os.Exit(runStartFleet(args))
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -81,6 +85,7 @@ Subcommands:
   open                open the cockpit (launches tmux with dashboard + control)
   start <repo> ...    open a Claude pane in repos[<repo>] running the given task
   spawn <repo> ...    alias for start
+  start-fleet <repo>  open an Agent View pane scoped to repos[<repo>] (multi-agent)
   mark-ended          dismiss stale sessions (synthetic SessionEnd)
   hook <Event>        internal: ingest a Claude Code hook payload
   dashboard           internal: render the dashboard pane (loop until SIGTERM)
@@ -402,14 +407,6 @@ func runHook(args []string) int {
 		return runPaneExitedHook(args[1:])
 	}
 
-	if os.Getenv("COCKPIT_SESSION_ACTIVE") != "1" {
-		return 0
-	}
-	stateHome := os.Getenv("COCKPIT_STATE_HOME")
-	if stateHome == "" {
-		return 0
-	}
-
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return 0
@@ -426,11 +423,25 @@ func runHook(args []string) int {
 		return 0
 	}
 
+	resolver := &hook.Resolver{
+		HomeDir:   homeDir(),
+		Getenv:    os.Getenv,
+		ReadFile:  os.ReadFile,
+		EvalLinks: filepath.EvalSymlinks,
+		FindRoot:  workspace.FindRoot,
+		LoadWS:    workspace.Load,
+		Sleep:     time.Sleep,
+	}
+	stateHome, paneID := resolver.Resolve(sid)
+	if stateHome == "" {
+		return 0
+	}
+
 	env := hook.Env{
 		PrimaryRepo:          os.Getenv("COCKPIT_PRIMARY_REPO"),
 		DeclaredRelatedRepos: os.Getenv("COCKPIT_DECLARED_RELATED_REPOS"),
 		TaskName:             os.Getenv("COCKPIT_TASK_NAME"),
-		PaneID:               os.Getenv("TMUX_PANE"),
+		PaneID:               paneID,
 	}
 	ev := hook.Build(event, sid, payload, env)
 	if ev == nil {
@@ -628,8 +639,7 @@ func runOpen(args []string) int {
 		die("open", "workspace name %q contains '.' or ':', which tmux session names cannot use; rename the workspace", ws.Name)
 	}
 
-	stateRoot := envOrDefault("XDG_STATE_HOME", filepath.Join(homeDir(), ".local", "state"))
-	stateHome := filepath.Join(stateRoot, "cc-cockpit", ws.Name)
+	stateHome := hook.ComputeStateHome(homeDir(), os.Getenv, ws.Name)
 	if err := os.MkdirAll(stateHome, 0o755); err != nil {
 		die("open", "cannot create state dir %q: %v", stateHome, err)
 	}
@@ -838,6 +848,86 @@ func runSpawn(args []string) int {
 		"COCKPIT_TASK_NAME=" + task,
 	}
 	if _, err := tmux.NewClaudePane(workspaceName, paneName, abs, windowEnv, "claude"); err != nil {
+		die(cmdName, "%v", err)
+	}
+	return 0
+}
+
+func runStartFleet(args []string) int {
+	cmdName := envOrDefault("CC_COCKPIT_CMD_NAME", "start-fleet")
+
+	var related string
+	var positional []string
+	sep := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if sep {
+			positional = append(positional, a)
+			continue
+		}
+		switch a {
+		case "--related":
+			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
+				die(cmdName, "%s requires a value", a)
+			}
+			related = args[i+1]
+			i++
+		case "--":
+			sep = true
+		default:
+			if strings.HasPrefix(a, "-") {
+				die(cmdName, "unknown flag %q", a)
+			}
+			positional = append(positional, a)
+		}
+	}
+	if len(positional) == 0 {
+		die(cmdName, "repo required (usage: cc-cockpit %s <repo>)", cmdName)
+	}
+	if len(positional) > 1 {
+		die(cmdName, "unexpected extra args after <repo> (use 'cc-cockpit start' for single-task panes)")
+	}
+	repo := positional[0]
+
+	stateHome := os.Getenv("COCKPIT_STATE_HOME")
+	if stateHome == "" {
+		die(cmdName, "must be run inside the cockpit (run 'cc-cockpit open' first)")
+	}
+	wsRoot := os.Getenv("CC_COCKPIT_WORKSPACE_ROOT")
+	if wsRoot == "" {
+		die(cmdName, "CC_COCKPIT_WORKSPACE_ROOT not set")
+	}
+	workspaceName := envOrDefault("COCKPIT_WORKSPACE_NAME", "?")
+
+	ws, err := workspace.Load(wsRoot)
+	if err != nil {
+		die(cmdName, "workspace.json: %v", err)
+	}
+	if ws.Repos == nil {
+		die(cmdName, "workspace.json .repos must be an object { \"<label>\": \"<path>\", ... }")
+	}
+	abs, err := ws.Resolve(wsRoot, repo)
+	if err != nil {
+		die(cmdName, "%v", err)
+	}
+
+	if _, err := exec.LookPath("claude"); err != nil {
+		die(cmdName, "'claude' not found on PATH")
+	}
+
+	paneName := "fleet · " + repo
+	if len(paneName) > 60 {
+		paneName = paneName[:60]
+	}
+
+	windowEnv := []string{
+		"COCKPIT_SESSION_ACTIVE=1",
+		"COCKPIT_STATE_HOME=" + stateHome,
+		"COCKPIT_WORKSPACE_NAME=" + workspaceName,
+		"COCKPIT_PRIMARY_REPO=" + repo,
+		"COCKPIT_DECLARED_RELATED_REPOS=" + related,
+	}
+	if _, err := tmux.NewClaudePane(workspaceName, paneName, abs, windowEnv, "claude", "agents", "--cwd", abs); err != nil {
 		die(cmdName, "%v", err)
 	}
 	return 0
