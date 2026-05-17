@@ -123,6 +123,30 @@ func listPaneIDs(session string, windowIdx int) ([]string, error) {
 	return ids, nil
 }
 
+// KillPane closes one pane by id (e.g. "%42"). Caller should ignore the
+// error: by the time `end` runs, the operator's pane may already be dead.
+func KillPane(paneID string) error {
+	if paneID == "" {
+		return nil
+	}
+	return cmd("kill-pane", "-t", paneID).Run()
+}
+
+// SetPaneBorderColor sets the foreground (border + title) color of one pane,
+// overriding the server-wide pane-border-style. Used by the dashboard loop
+// to signal session status at a glance (green=running, yellow=waiting, etc).
+// Caller can ignore errors — a dead pane is benign here.
+func SetPaneBorderColor(paneID, color string) error {
+	if paneID == "" || color == "" {
+		return nil
+	}
+	return cmd(setPaneBorderColorArgs(paneID, color)...).Run()
+}
+
+func setPaneBorderColorArgs(paneID, color string) []string {
+	return []string{"select-pane", "-t", paneID, "-P", "fg=" + color}
+}
+
 // SetPaneExitedHook installs shellCmd as the pane-exited hook for one tmux
 // session. tmux fires pane-exited when a pane's process dies (the case for
 // crashed Claude sessions). It does NOT fire on `kill-pane` / `kill-window`,

@@ -66,7 +66,7 @@ func renderActiveTable(st state.State, now time.Time) string {
 		return active[i].sess.StartedAt < active[j].sess.StartedAt
 	})
 	if len(active) == 0 {
-		return "  (no active sessions — start <repo> <task>)"
+		return "  (no active sessions — start [<repo>] <task>)"
 	}
 
 	var b strings.Builder
@@ -142,9 +142,9 @@ func renderEndedFooter(st state.State, now time.Time) string {
 func renderCommandsFooter() string {
 	return strings.Join([]string{
 		"─── commands ─── (run them in the \"control\" pane →)",
-		"  start <repo> <task>        spawn a Claude session",
+		"  start [<repo>] <task>      spawn a Claude session (repo auto-detected)",
 		"  start-fleet <repo> [name]  open an Agent View pane (multi-agent)",
-		"  mark-ended <prefix>        dismiss a stuck session",
+		"  end <prefix>               end a session and close its pane",
 		"  Ctrl-b d                   detach (sessions persist)",
 	}, "\n")
 }

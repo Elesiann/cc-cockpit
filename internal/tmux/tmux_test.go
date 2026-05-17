@@ -41,6 +41,14 @@ func TestSplitControlArgs_UsesProvidedControlCmd(t *testing.T) {
 	}
 }
 
+func TestSetPaneBorderColorArgs(t *testing.T) {
+	got := setPaneBorderColorArgs("%42", "yellow")
+	want := []string{"select-pane", "-t", "%42", "-P", "fg=yellow"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v\nwant %v", got, want)
+	}
+}
+
 func TestServerOptionArgs(t *testing.T) {
 	got := serverOptionArgs()
 	want := [][]string{

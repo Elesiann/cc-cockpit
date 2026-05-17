@@ -30,7 +30,7 @@ import (
 // Version is the binary's reported version. Overridden at release time via:
 //
 //	go build -ldflags="-X main.Version=<tag>"
-var Version = "0.4.1"
+var Version = "0.5.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -46,8 +46,8 @@ func main() {
 		os.Exit(runInit(args))
 	case "doctor":
 		os.Exit(runDoctor(args))
-	case "mark-ended":
-		os.Exit(runMarkEnded(args))
+	case "end":
+		os.Exit(runEnd(args))
 	case "hook":
 		os.Exit(runHook(args))
 	case "dashboard":
@@ -60,9 +60,6 @@ func main() {
 		os.Exit(runOpen(args))
 	case "start":
 		os.Setenv("CC_COCKPIT_CMD_NAME", "start")
-		os.Exit(runSpawn(args))
-	case "spawn":
-		os.Setenv("CC_COCKPIT_CMD_NAME", "spawn")
 		os.Exit(runSpawn(args))
 	case "start-fleet":
 		os.Setenv("CC_COCKPIT_CMD_NAME", "start-fleet")
@@ -83,10 +80,9 @@ Subcommands:
   init                create .cc-cockpit/workspace.json
   doctor              check install + workspace health
   open                open the cockpit (launches tmux with dashboard + control)
-  start <repo> ...    open a Claude pane in repos[<repo>] running the given task
-  spawn <repo> ...    alias for start
+  start [<repo>] <task>   open a Claude pane in repos[<repo>] running the given task (repo auto-detected from cwd if inside a repo)
   start-fleet <repo> ...  open an Agent View pane scoped to repos[<repo>] (multi-agent)
-  mark-ended          dismiss stale sessions (synthetic SessionEnd)
+  end <prefix>            end a session (synthetic SessionEnd) and close its tmux pane
   hook <Event>        internal: ingest a Claude Code hook payload
   dashboard           internal: render the dashboard pane (loop until SIGTERM)
   reduce              read events.jsonl on stdin, write reduced state JSON to stdout
@@ -192,8 +188,12 @@ func runDoctor(args []string) int {
 	ok := func(format string, args ...any) {
 		fmt.Printf("ok: "+format+"\n", args...)
 	}
-	fail := func(format string, args ...any) {
+	// failFix prints `fail: <desc>` followed by an indented `→ fix: <hint>`
+	// line so every failure tells the operator what to do next instead of
+	// just what's wrong.
+	failFix := func(fix, format string, args ...any) {
 		fmt.Printf("fail: "+format+"\n", args...)
+		fmt.Printf("  → fix: %s\n", fix)
 		issues++
 	}
 
@@ -203,29 +203,31 @@ func runDoctor(args []string) int {
 		case err == nil:
 			ok("%s found: %s", tool, path)
 		case tool == "cc-cockpit":
-			fail("cc-cockpit not found on PATH (run 'cc-cockpit install')")
-		default:
-			fail("%s not found on PATH", tool)
+			failFix("cc-cockpit install", "cc-cockpit not found on PATH")
+		case tool == "tmux":
+			failFix("install tmux 3.0+ (apt/brew/etc)", "tmux not found on PATH")
+		case tool == "claude":
+			failFix("install Claude Code from claude.com/claude-code", "claude not found on PATH")
 		}
 	}
 	if v, err := tmux.Version(); err == nil {
 		if checkTmuxVersion(v) {
 			ok("tmux version: %s", v)
 		} else {
-			fail("tmux version too old: %s (need 3.0+)", v)
+			failFix("install tmux 3.0+ (apt/brew/etc)", "tmux version too old: %s (need 3.0+)", v)
 		}
 	}
 
 	settingsPath := envOrDefault("CLAUDE_SETTINGS_PATH", filepath.Join(homeDir(), ".claude", "settings.json"))
 	settingsRaw, err := os.ReadFile(settingsPath)
 	if err != nil {
-		fail("Claude settings not found: %s (run cc-cockpit install)", settingsPath)
+		failFix("cc-cockpit install", "Claude settings not found: %s", settingsPath)
 	} else {
 		var top struct {
 			Hooks map[string][]any `json:"hooks"`
 		}
 		if err := json.Unmarshal(settingsRaw, &top); err != nil {
-			fail("Claude settings invalid: %v", err)
+			failFix("cc-cockpit install (rewrites the hooks block)", "Claude settings invalid: %v", err)
 		} else {
 			for _, ev := range install.Events {
 				found := false
@@ -238,7 +240,7 @@ func runDoctor(args []string) int {
 				if found {
 					ok("Claude hook installed: %s", ev)
 				} else {
-					fail("Claude hook missing: %s (run cc-cockpit install)", ev)
+					failFix("cc-cockpit install", "Claude hook missing: %s", ev)
 				}
 			}
 			matcherOK := false
@@ -251,7 +253,7 @@ func runDoctor(args []string) int {
 			if matcherOK {
 				ok("Notification hook matcher is idle_prompt|permission_prompt")
 			} else {
-				fail("Notification hook matcher missing idle_prompt|permission_prompt")
+				failFix("cc-cockpit install", "Notification hook matcher missing idle_prompt|permission_prompt")
 			}
 		}
 	}
@@ -260,27 +262,27 @@ func runDoctor(args []string) int {
 	cwd, _ := os.Getwd()
 	root := workspace.FindRoot(cwd)
 	if root == "" {
-		fail("workspace not initialized (run cc-cockpit init from the workspace parent)")
+		failFix("cd to the workspace parent and run 'cc-cockpit init'", "workspace not initialized")
 	} else {
 		ws, err := workspace.Load(root)
 		switch {
 		case err != nil:
-			fail("workspace.json invalid: %v", err)
+			failFix("edit .cc-cockpit/workspace.json (see README for schema)", "workspace.json invalid: %v", err)
 		case !workspace.ValidSlug(ws.Name):
-			fail("invalid workspace name %q", ws.Name)
+			failFix("rename workspace.name to lowercase-with-dashes (matches ^[a-zA-Z0-9][a-zA-Z0-9._-]*$)", "invalid workspace name %q", ws.Name)
 		default:
 			ok("workspace: %s (%s)", ws.Name, root)
 			if len(ws.Repos) == 0 {
-				fail("workspace has no repos configured")
+				failFix("cc-cockpit init <label>=<path> ... (or edit workspace.json .repos)", "workspace has no repos configured")
 			}
 			for _, k := range sortedKeys(ws.Repos) {
 				rel := ws.Repos[k]
 				if !workspace.ValidSlug(k) {
-					fail("invalid repo label %q", k)
+					failFix("rename the label to lowercase-with-dashes in workspace.json", "invalid repo label %q", k)
 					continue
 				}
 				if err := workspace.CheckRepo(root, rel); err != nil {
-					fail("repo '%s': %v", k, err)
+					failFix("check the path exists and is a git repo (or remove the entry)", "repo '%s': %v", k, err)
 				} else {
 					ok("repo '%s': %s", k, rel)
 				}
@@ -321,9 +323,9 @@ func sortedKeys[V any](m map[string]V) []string {
 
 // ---------- mark-ended ----------
 
-func runMarkEnded(args []string) int {
+func runEnd(args []string) int {
 	// Hand-parse so --yes/-y can appear anywhere (Go's flag pkg stops at the
-	// first positional, which would reject `mark-ended all-non-ended --yes`).
+	// first positional, which would reject `end all-non-ended --yes`).
 	var yes bool
 	var posArgs []string
 	for _, a := range args {
@@ -332,27 +334,27 @@ func runMarkEnded(args []string) int {
 			yes = true
 		default:
 			if strings.HasPrefix(a, "-") {
-				die("mark-ended", "unknown flag %q", a)
+				die("end", "unknown flag %q", a)
 			}
 			posArgs = append(posArgs, a)
 		}
 	}
 	if len(posArgs) == 0 {
-		die("mark-ended", "need <session_id-prefix> (or 'all-non-ended') [--yes]")
+		die("end", "need <session_id-prefix> (or 'all-non-ended') [--yes]")
 	}
 	if len(posArgs) > 1 {
-		die("mark-ended", "only one positional argument expected")
+		die("end", "only one positional argument expected")
 	}
 	prefix := posArgs[0]
 
 	stateHome := os.Getenv("COCKPIT_STATE_HOME")
 	if stateHome == "" {
-		die("mark-ended", "COCKPIT_STATE_HOME not set (run inside 'cc-cockpit open')")
+		die("end", "COCKPIT_STATE_HOME not set (run inside 'cc-cockpit open')")
 	}
 
 	f, err := os.Open(filepath.Join(stateHome, "events.jsonl"))
 	if err != nil {
-		die("mark-ended", "no events.jsonl in %s", stateHome)
+		die("end", "no events.jsonl in %s", stateHome)
 	}
 	st := state.Reduce(f)
 	_ = f.Close()
@@ -369,25 +371,36 @@ func runMarkEnded(args []string) int {
 	sort.Strings(targets)
 
 	if len(targets) == 0 {
-		fmt.Printf("mark-ended: no matching non-ended sessions for %q\n", prefix)
+		fmt.Printf("end: no matching non-ended sessions for %q\n", prefix)
 		return 0
 	}
 
 	if len(targets) > 1 && !yes {
-		fmt.Fprintf(os.Stderr, "mark-ended: would dismiss %d session(s):\n", len(targets))
+		fmt.Fprintf(os.Stderr, "end: would end %d session(s):\n", len(targets))
 		for _, sid := range targets {
 			fmt.Fprintf(os.Stderr, "  - %s\n", sid)
 		}
-		die("mark-ended", "re-run with --yes to confirm (or give a more specific prefix)")
+		die("end", "re-run with --yes to confirm (or give a more specific prefix)")
 	}
 
 	for _, sid := range targets {
 		if err := appendSyntheticEnd(stateHome, sid, "operator-dismissed"); err != nil {
-			die("mark-ended", "append: %v", err)
+			die("end", "append: %v", err)
 		}
-		fmt.Printf("  dismissed: %s\n", sid)
+		fmt.Printf("  ended: %s\n", sid)
+		// Close the tmux pane if we know one. Fleet/bg sessions have pane_id
+		// null — skip them (operator can't single-out one bg agent's "pane").
+		// Ignore errors: a pane that died between Reduce and now is a benign
+		// race. The pane-exited hook that fires next will be a no-op because
+		// the synthetic end we just wrote already marks the session ended.
+		var paneID string
+		if err := json.Unmarshal(st.Sessions[sid].PaneID, &paneID); err == nil && paneID != "" {
+			if err := tmux.KillPane(paneID); err == nil {
+				fmt.Printf("    closed pane %s\n", paneID)
+			}
+		}
 	}
-	fmt.Printf("mark-ended: %d session(s) dismissed (any later event un-dismisses).\n", len(targets))
+	fmt.Printf("end: %d session(s) ended (any later event un-ends).\n", len(targets))
 	return 0
 }
 
@@ -618,9 +631,8 @@ if [ -f "$HOME/.bashrc" ]; then
 fi
 
 alias start='cc-cockpit start'
-alias spawn='cc-cockpit spawn'
 alias start-fleet='cc-cockpit start-fleet'
-alias mark-ended='cc-cockpit mark-ended'
+alias end='cc-cockpit end'
 alias doctor='cc-cockpit doctor'
 `
 
@@ -774,8 +786,37 @@ func acquireLiveLock(stateHome, name string) error {
 
 // ---------- spawn / start ----------
 
+// detectRepoFromCwd returns the label in ws.Repos whose absolute path is the
+// longest prefix of cwd. Returns "" when cwd is outside every repo, when
+// workspace lookups fail, or when a label fails to resolve (which usually
+// means the directory was renamed since `init`; doctor will flag it).
+func detectRepoFromCwd(ws *workspace.Workspace, wsRoot string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	if real, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = real
+	}
+	var bestLabel string
+	var bestLen int
+	for label := range ws.Repos {
+		abs, err := ws.Resolve(wsRoot, label)
+		if err != nil {
+			continue
+		}
+		if cwd == abs || strings.HasPrefix(cwd, abs+string(filepath.Separator)) {
+			if len(abs) > bestLen {
+				bestLabel = label
+				bestLen = len(abs)
+			}
+		}
+	}
+	return bestLabel
+}
+
 func runSpawn(args []string) int {
-	cmdName := envOrDefault("CC_COCKPIT_CMD_NAME", "spawn")
+	cmdName := envOrDefault("CC_COCKPIT_CMD_NAME", "start")
 
 	var repo, task, related string
 	var positional []string
@@ -811,26 +852,6 @@ func runSpawn(args []string) int {
 		}
 	}
 
-	if len(positional) > 0 {
-		taskStart := 0
-		if repo == "" {
-			repo = positional[0]
-			taskStart = 1
-		}
-		if taskStart < len(positional) {
-			if task != "" {
-				die(cmdName, "unexpected positional task %q", positional[taskStart])
-			}
-			task = strings.Join(positional[taskStart:], " ")
-		}
-	}
-
-	if repo == "" {
-		die(cmdName, "repo required (usage: cc-cockpit %s <repo> <task...>)", cmdName)
-	}
-	if task == "" {
-		die(cmdName, "task required (usage: cc-cockpit %s <repo> <task...>)", cmdName)
-	}
 	stateHome := os.Getenv("COCKPIT_STATE_HOME")
 	if stateHome == "" {
 		die(cmdName, "must be run inside the cockpit (run 'cc-cockpit open' first)")
@@ -847,6 +868,35 @@ func runSpawn(args []string) int {
 	}
 	if ws.Repos == nil {
 		die(cmdName, "workspace.json .repos must be an object { \"<label>\": \"<path>\", ... }")
+	}
+
+	// Repo resolution priority:
+	//   1. --repo flag (explicit override).
+	//   2. First positional, if it names a known label in ws.Repos.
+	//   3. cwd auto-detect: longest-prefix match against ws.Repos values.
+	//   4. Else error.
+	taskStart := 0
+	if repo == "" && len(positional) > 0 {
+		if _, ok := ws.Repos[positional[0]]; ok {
+			repo = positional[0]
+			taskStart = 1
+		}
+	}
+	if repo == "" {
+		repo = detectRepoFromCwd(ws, wsRoot)
+	}
+	if taskStart < len(positional) {
+		if task != "" {
+			die(cmdName, "unexpected positional task %q", positional[taskStart])
+		}
+		task = strings.Join(positional[taskStart:], " ")
+	}
+
+	if repo == "" {
+		die(cmdName, "repo required (usage: cc-cockpit %s [<repo>] <task...>; auto-detect needs cwd inside a known repo)", cmdName)
+	}
+	if task == "" {
+		die(cmdName, "task required (usage: cc-cockpit %s [<repo>] <task...>)", cmdName)
 	}
 	abs, err := ws.Resolve(wsRoot, repo)
 	if err != nil {

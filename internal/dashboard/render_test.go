@@ -163,11 +163,14 @@ func TestRender_CommandsFooter_AlwaysVisible(t *testing.T) {
 	now := time.Date(2026, 4, 20, 15, 0, 5, 0, time.UTC)
 	for label, st := range map[string]state.State{"empty": empty, "with-session": withSession} {
 		frame := Render(st, "ws", now)
-		if !strings.Contains(frame, "start <repo> <task>") {
+		if !strings.Contains(frame, "start [<repo>] <task>") {
 			t.Errorf("[%s] cheatsheet missing the start example: %q", label, frame)
 		}
 		if !strings.Contains(frame, "start-fleet <repo>") {
 			t.Errorf("[%s] cheatsheet missing the start-fleet example: %q", label, frame)
+		}
+		if !strings.Contains(frame, "end <prefix>") {
+			t.Errorf("[%s] cheatsheet missing the end example: %q", label, frame)
 		}
 		if !strings.Contains(frame, "control") {
 			t.Errorf("[%s] cheatsheet should reference the control pane: %q", label, frame)

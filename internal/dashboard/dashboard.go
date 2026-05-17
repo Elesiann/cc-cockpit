@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/elesiann/cc-cockpit/internal/state"
+	"github.com/elesiann/cc-cockpit/internal/tmux"
 )
 
 // Run drives the dashboard loop until SIGINT/SIGTERM/SIGHUP/SIGQUIT.
@@ -43,6 +44,7 @@ func Run(stateHome, workspaceName string) error {
 
 	var prevFrame string
 	var prevCurrentJSON []byte
+	prevPaneColor := make(map[string]string)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -85,6 +87,7 @@ func Run(stateHome, workspaceName string) error {
 				lastBellSeq = info.MaxSeq
 				writeAtomic(bellPath, []byte(strconv.FormatInt(lastBellSeq, 10)+"\n"))
 			}
+			applyPaneBorderColors(st, prevPaneColor)
 		}
 
 		select {
@@ -159,6 +162,46 @@ func computeBell(data []byte, lastBellSeq int64) bellInfo {
 		}
 	}
 	return info
+}
+
+// statusToBorderColor maps a session status to a tmux color name. Returns
+// "" for unknown status (caller skips emit). green / yellow / cinzas chosen
+// to give "this needs my attention" pop without screaming the whole grid.
+func statusToBorderColor(status string) string {
+	switch status {
+	case state.StatusRunning:
+		return "green"
+	case state.StatusWaitingInput:
+		return "yellow"
+	case state.StatusIdle:
+		return "colour244"
+	case state.StatusEnded:
+		return "colour240"
+	}
+	return ""
+}
+
+// applyPaneBorderColors issues `select-pane -P fg=<color>` for each session
+// whose pane border color changed since the last tick. The prev map caches
+// last-emitted color per pane so steady-state ticks issue zero tmux calls.
+// Sessions with null pane_id (fleet/bg agents) are skipped — they don't own
+// a single pane to color.
+func applyPaneBorderColors(st state.State, prev map[string]string) {
+	for _, sess := range st.Sessions {
+		var paneID string
+		if err := json.Unmarshal(sess.PaneID, &paneID); err != nil || paneID == "" {
+			continue
+		}
+		color := statusToBorderColor(sess.Status)
+		if color == "" {
+			continue
+		}
+		if prev[paneID] == color {
+			continue
+		}
+		_ = tmux.SetPaneBorderColor(paneID, color)
+		prev[paneID] = color
+	}
 }
 
 func writeAtomic(path string, data []byte) {
