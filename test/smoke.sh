@@ -85,10 +85,13 @@ echo '[1] hook silent without COCKPIT_SESSION_ACTIVE'
 unset COCKPIT_SESSION_ACTIVE COCKPIT_STATE_HOME
 out="$(echo '{"session_id":"x","cwd":"/tmp"}' | "$BIN" hook SessionStart 2>&1)"
 rc=$?
-if [ "$rc" -eq 0 ] && [ -z "$out" ] && [ ! -d "$XDG_STATE_HOME" ]; then
-  pass 'hook without COCKPIT_SESSION_ACTIVE: exit 0, no output, no state dir touched'
+# Since 0.6.1 the hook always routes: without workspace context it falls back
+# to the _global workspace. So the state dir MAY be created — that's correct.
+# The invariant is: exit 0 and no output (hook is always silent on stdout/stderr).
+if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
+  pass 'hook without COCKPIT_SESSION_ACTIVE: exit 0, no output (routes to global workspace)'
 else
-  fail "hook guard breached: rc=$rc out='$out' state_dir=$(ls "$XDG_STATE_HOME" 2>/dev/null)"
+  fail "hook guard breached: rc=$rc out='$out'"
 fi
 
 # =============================================================
@@ -272,10 +275,10 @@ export COCKPIT_STATE_HOME="$SANDBOX/spawn-state"
 export CC_COCKPIT_WORKSPACE_ROOT="$SANDBOX/ws-spawn"
 export COCKPIT_WORKSPACE_NAME=spawntest
 
-out="$("$BIN" spawn --repo escape --task t 2>&1)"
+out="$("$BIN" start --repo escape --task t 2>&1)"
 echo "$out" | grep -q 'outside workspace root' && pass 'escape (../outside-ws) rejected' || fail "escape accepted: '$out'"
 
-out="$("$BIN" spawn --repo notgit --task t 2>&1)"
+out="$("$BIN" start --repo notgit --task t 2>&1)"
 echo "$out" | grep -q 'not a git repo' && pass 'non-git dir rejected' || fail "non-git accepted: '$out'"
 
 FAKE_BIN="$SANDBOX/fake-bin"
@@ -301,7 +304,7 @@ chmod +x "$FAKE_BIN/tmux" "$FAKE_BIN/claude"
 OLD_PATH="$PATH"
 export PATH="$FAKE_BIN:$PATH"
 : > "$SANDBOX/tmux-spawn.args"
-out="$("$BIN" spawn --repo good --task "layout test" 2>&1)"
+out="$("$BIN" start --repo good --task "layout test" 2>&1)"
 rc=$?
 export PATH="$OLD_PATH"
 if [ "$rc" -eq 0 ] \
@@ -309,9 +312,9 @@ if [ "$rc" -eq 0 ] \
    && grep -qx -- '-v' "$SANDBOX/tmux-spawn.args" \
    && grep -qx -- '-f' "$SANDBOX/tmux-spawn.args" \
    && grep -qx -- '-c' "$SANDBOX/tmux-spawn.args"; then
-  pass 'spawn launches tmux split-window -v -f (full-width bottom pane)'
+  pass 'start launches tmux split-window -v -f (full-width bottom pane)'
 else
-  fail "spawn failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
+  fail "start failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
 fi
 
 OLD_PATH="$PATH"
@@ -329,38 +332,38 @@ fi
 
 OLD_PATH="$PATH"
 export PATH="$FAKE_BIN:$PATH"
-out="$("$BIN" spawn good positional task 2>&1)"
+out="$("$BIN" start good positional task 2>&1)"
 rc=$?
 export PATH="$OLD_PATH"
 if [ "$rc" -eq 0 ] \
    && grep -qx -- 'good: positional task' "$SANDBOX/tmux-spawn.args" \
    && grep -qx -- 'COCKPIT_TASK_NAME=positional task' "$SANDBOX/tmux-spawn.args"; then
-  pass 'spawn accepts shorthand repo plus task words'
+  pass 'start accepts shorthand repo plus task words'
 else
-  fail "spawn shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
+  fail "start shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
 fi
 
 unset COCKPIT_STATE_HOME CC_COCKPIT_WORKSPACE_ROOT COCKPIT_WORKSPACE_NAME
 
 # =============================================================
-echo '[7] spawn rejects flags without values cleanly'
+echo '[7] start rejects flags without values cleanly'
 # =============================================================
 for flag in --repo --task --related; do
-  out="$("$BIN" spawn "$flag" 2>&1)"
+  out="$("$BIN" start "$flag" 2>&1)"
   rc=$?
-  if [ "$rc" -eq 2 ] && echo "$out" | grep -q "spawn: $flag requires a value"; then
-    pass "spawn $flag without value rejected cleanly"
+  if [ "$rc" -eq 2 ] && [[ "$out" == *"$flag requires a value"* ]]; then
+    pass "start $flag without value rejected cleanly"
   else
-    fail "spawn $flag bad error: rc=$rc out='$out'"
+    fail "start $flag bad error: rc=$rc out='$out'"
   fi
 done
 
-out="$("$BIN" spawn --repo --task t 2>&1)"
+out="$("$BIN" start --repo --task t 2>&1)"
 rc=$?
-if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'spawn: --repo requires a value'; then
-  pass 'spawn --repo followed by another flag rejected as missing value'
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q '\-\-repo requires a value'; then
+  pass 'start --repo followed by another flag rejected as missing value'
 else
-  fail "spawn --repo accepted another flag as value: rc=$rc out='$out'"
+  fail "start --repo accepted another flag as value: rc=$rc out='$out'"
 fi
 
 # =============================================================
@@ -376,21 +379,24 @@ THIS LINE IS NOT JSON
 EOF
 dropped="$("${REDUCER[@]}" < "$SANDBOX/events-bad.jsonl" | jq -r '.dropped_events')"
 status="$("${REDUCER[@]}" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status')"
-[ "$dropped" = "4" ] && [ "$status" = "idle" ] \
+# Stop event sets `completed` (the granular state machine from 0.7). The
+# render layer derives `idle` visually after IdleAfterCompleted elapses;
+# the reducer itself stays event-pure.
+[ "$dropped" = "4" ] && [ "$status" = "completed" ] \
   && pass "reducer: dropped=$dropped, status=$status" \
-  || fail "reducer: dropped=$dropped, status=$status (expected 4, idle)"
+  || fail "reducer: dropped=$dropped, status=$status (expected 4, completed)"
 
 # =============================================================
-echo '[9] mark-ended tolerates empty current sessions'
+echo '[9] end tolerates empty current sessions'
 # =============================================================
 mkdir -p "$SANDBOX/mark-empty"
 touch "$SANDBOX/mark-empty/events.jsonl"
-out="$(COCKPIT_STATE_HOME="$SANDBOX/mark-empty" "$BIN" mark-ended all-non-ended --yes 2>&1)"
+out="$(COCKPIT_STATE_HOME="$SANDBOX/mark-empty" "$BIN" end all-non-ended --yes 2>&1)"
 rc=$?
 if [ "$rc" -eq 0 ] && echo "$out" | grep -q "no matching non-ended sessions"; then
-  pass 'mark-ended handles empty sessions cleanly'
+  pass 'end handles empty sessions cleanly'
 else
-  fail "mark-ended empty sessions failed: rc=$rc out='$out'"
+  fail "end empty sessions failed: rc=$rc out='$out'"
 fi
 
 # =============================================================
@@ -406,9 +412,13 @@ cat > "$SANDBOX/events-dismiss.jsonl" <<EOF
 EOF
 a_status="$("${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.a.status')"
 b_status="$("${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.status')"
-[ "$a_status" = "running" ] && [ "$b_status" = "ended" ] \
+# Since 0.7 the granular state machine makes UserPromptSubmit set `thinking`
+# (not the generic `running`). Revival sets `running` first, then the event
+# handler refines it — so the final status for a revived+UserPromptSubmit
+# session is `thinking`.
+[ "$a_status" = "thinking" ] && [ "$b_status" = "ended" ] \
   && pass "synthetic-end revived (a=$a_status); natural-end terminal (b=$b_status)" \
-  || fail "dismissal logic broken: a=$a_status (want running), b=$b_status (want ended)"
+  || fail "dismissal logic broken: a=$a_status (want thinking), b=$b_status (want ended)"
 
 # =============================================================
 echo '[11] reducer determinism'
