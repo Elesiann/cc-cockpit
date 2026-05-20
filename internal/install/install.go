@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -78,19 +79,25 @@ func MergeHooks(existing []byte, binPath string) ([]byte, error) {
 func EntryHasCockpitHook(e any) bool { return entryHasCockpitHook(e) }
 
 func entryHasCockpitHook(e any) bool {
+	cmds := cockpitHookCommands(e)
+	return len(cmds) > 0
+}
+
+func cockpitHookCommands(e any) []string {
 	entry, _ := e.(map[string]any)
 	if entry == nil {
-		return false
+		return nil
 	}
 	hooks, _ := entry["hooks"].([]any)
+	var cmds []string
 	for _, h := range hooks {
 		hMap, _ := h.(map[string]any)
 		cmd, _ := hMap["command"].(string)
 		if strings.Contains(cmd, "cc-cockpit hook ") {
-			return true
+			cmds = append(cmds, cmd)
 		}
 	}
-	return false
+	return cmds
 }
 
 // EntryHasMatcher reports whether a hook entry uses the given matcher AND
@@ -160,7 +167,7 @@ func HooksInstalled(settingsData []byte) (bool, error) {
 	for _, ev := range Events {
 		found := false
 		for _, e := range top.Hooks[ev] {
-			if entryHasCockpitHook(e) {
+			if cockpitHookEntryUsable(e) {
 				found = true
 				break
 			}
@@ -170,11 +177,34 @@ func HooksInstalled(settingsData []byte) (bool, error) {
 		}
 	}
 	for _, e := range top.Hooks[state.EventNotification] {
-		if EntryHasMatcher(e, "idle_prompt|permission_prompt") {
+		if EntryHasMatcher(e, "idle_prompt|permission_prompt") && cockpitHookEntryUsable(e) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func cockpitHookEntryUsable(e any) bool {
+	for _, cmd := range cockpitHookCommands(e) {
+		if hookCommandBinaryUsable(cmd) {
+			return true
+		}
+	}
+	return false
+}
+
+func hookCommandBinaryUsable(cmd string) bool {
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return false
+	}
+	bin := fields[0]
+	if filepath.IsAbs(bin) {
+		st, err := os.Stat(bin)
+		return err == nil && !st.IsDir() && st.Mode()&0o111 != 0
+	}
+	_, err := exec.LookPath(bin)
+	return err == nil
 }
 
 // EnsureHooks installs cc-cockpit's Claude Code hooks if HooksInstalled
@@ -203,14 +233,28 @@ func EnsureHooks(settingsPath string) error {
 	if ok {
 		return nil
 	}
-	selfPath, err := os.Executable()
+	selfPath, err := hookBinaryPath()
 	if err != nil {
 		return fmt.Errorf("locate binary: %w", err)
+	}
+	return InstallHooks(settingsPath, selfPath)
+}
+
+func hookBinaryPath() (string, error) {
+	if p, err := exec.LookPath("cc-cockpit"); err == nil && p != "" {
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs, nil
+		}
+		return p, nil
+	}
+	selfPath, err := os.Executable()
+	if err != nil {
+		return "", err
 	}
 	if real, err := filepath.EvalSymlinks(selfPath); err == nil {
 		selfPath = real
 	}
-	return InstallHooks(settingsPath, selfPath)
+	return selfPath, nil
 }
 
 // InstallBin symlinks binDir/cc-cockpit -> selfPath. No-op if the symlink

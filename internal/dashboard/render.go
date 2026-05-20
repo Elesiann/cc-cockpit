@@ -43,10 +43,17 @@ func Render(st state.State, workspaceName string, now time.Time) string {
 // carries a Color, the row is wrapped in the matching ANSI escape so the
 // user's /color choice surfaces visually.
 func RenderWithMetas(st state.State, workspaceName string, now time.Time, metas map[string]SessionMeta) string {
+	return RenderWithMetasAndRecaps(st, workspaceName, now, metas, nil)
+}
+
+// RenderWithMetasAndRecaps is RenderWithMetas plus optional native Claude Code
+// recaps keyed by session_id. Missing recaps are omitted — no placeholder — so
+// the dashboard only spends vertical space on signal that already exists.
+func RenderWithMetasAndRecaps(st state.State, workspaceName string, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
 	var b strings.Builder
 	b.WriteString(renderHeader(st, workspaceName))
 	b.WriteString("\n\n")
-	b.WriteString(renderActiveTable(st, now, metas))
+	b.WriteString(renderActiveTable(st, now, metas, recaps))
 	if footer := renderEndedFooter(st, now); footer != "" {
 		b.WriteString("\n\n")
 		b.WriteString(footer)
@@ -65,10 +72,16 @@ func RenderMulti(samples []TaggedState, title string, now time.Time) string {
 
 // RenderMultiWithMetas is RenderMulti plus /rename + /color metadata.
 func RenderMultiWithMetas(samples []TaggedState, title string, now time.Time, metas map[string]SessionMeta) string {
+	return RenderMultiWithMetasAndRecaps(samples, title, now, metas, nil)
+}
+
+// RenderMultiWithMetasAndRecaps is RenderMultiWithMetas plus optional native
+// Claude Code recaps keyed by session_id.
+func RenderMultiWithMetasAndRecaps(samples []TaggedState, title string, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
 	var b strings.Builder
 	b.WriteString(renderMultiHeader(samples, title))
 	b.WriteString("\n\n")
-	b.WriteString(renderMultiActiveTable(samples, now, metas))
+	b.WriteString(renderMultiActiveTable(samples, now, metas, recaps))
 	if footer := renderMultiEndedFooter(samples, now); footer != "" {
 		b.WriteString("\n\n")
 		b.WriteString(footer)
@@ -160,7 +173,7 @@ func renderMultiHeader(samples []TaggedState, title string) string {
 	return h
 }
 
-func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMeta) string {
+func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
 	type row struct {
 		sid  string
 		sess *state.Session
@@ -189,6 +202,7 @@ func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMe
 	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "  STATUS\tSID\tREPO\tTASK\tACT")
 	sids := make([]string, len(active))
+	recapSids := make([]string, len(active))
 	for i, r := range active {
 		s := r.sess
 		// Caps chosen so a worst-case row fits an 80-col dashboard pane after
@@ -204,12 +218,16 @@ func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMe
 			activitySince(s.LastActivity, now, false),
 		)
 		sids[i] = r.sid
+		if effectiveStatus(s, now) == state.StatusIdle {
+			recapSids[i] = r.sid
+		}
 	}
 	_ = tw.Flush()
-	return colorizeDataRowsWithHeader(b.String(), sids, metas)
+	table := colorizeDataRowsWithHeader(b.String(), sids, metas)
+	return insertRecapBlocks(table, recapSids, recaps, 2)
 }
 
-func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta) string {
+func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
 	type row struct {
 		sid  string
 		ws   string
@@ -238,6 +256,7 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "  STATUS\tSID\tWS\tREPO\tTASK\tACT")
 	sids := make([]string, len(active))
+	recapSids := make([]string, len(active))
 	for i, r := range active {
 		s := r.sess
 		ws := truncRunes(r.ws, 12)
@@ -252,9 +271,13 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 			activitySince(s.LastActivity, now, false),
 		)
 		sids[i] = r.sid
+		if effectiveStatus(s, now) == state.StatusIdle {
+			recapSids[i] = r.sid
+		}
 	}
 	_ = tw.Flush()
-	return colorizeDataRowsWithHeader(b.String(), sids, metas)
+	table := colorizeDataRowsWithHeader(b.String(), sids, metas)
+	return insertRecapBlocks(table, recapSids, recaps, 2)
 }
 
 func renderEndedFooter(st state.State, now time.Time) string {
@@ -545,6 +568,60 @@ func colorizeDataRows(table string, sids []string, metas map[string]SessionMeta,
 // (`─── active (N) ───`) followed by the tabwriter column header.
 func colorizeDataRowsWithHeader(table string, sids []string, metas map[string]SessionMeta) string {
 	return colorizeDataRows(table, sids, metas, 2)
+}
+
+// insertRecapBlocks inserts optional recap blocks immediately below their
+// matching session rows. It works after tabwriter/colorization: data rows are
+// still at deterministic positions before insertion, so walk from bottom to
+// top to avoid shifting later indices.
+func insertRecapBlocks(table string, sids []string, recaps map[string]string, preambleLines int) string {
+	if len(recaps) == 0 {
+		return table
+	}
+	lines := strings.Split(strings.TrimRight(table, "\n"), "\n")
+	for i := len(sids) - 1; i >= 0; i-- {
+		text := strings.TrimSpace(recaps[sids[i]])
+		if text == "" {
+			continue
+		}
+		idx := preambleLines + i
+		if idx < 0 || idx >= len(lines) {
+			continue
+		}
+		block := wrapRecap(text, 78)
+		insert := append([]string{}, block...)
+		lines = append(lines[:idx+1], append(insert, lines[idx+1:]...)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// wrapRecap renders a recap as one subtle, low-hierarchy line. Recaps are
+// context hints, not primary state: keep them gray, indented, and clipped so
+// the active table remains scannable.
+func wrapRecap(text string, width int) []string {
+	const prefix = "    ↳ recap: "
+	const ansiGray = "\033[90m"
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return nil
+	}
+	line := prefix + strings.Join(words, " ")
+	line = truncRunesWithEllipsis(line, width)
+	return []string{ansiGray + line + ansiReset}
+}
+
+func truncRunesWithEllipsis(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n == 1 {
+		return "…"
+	}
+	return string(r[:n-1]) + "…"
 }
 
 // sessionRepoLabel returns the display label for a session's REPO column.

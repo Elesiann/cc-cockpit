@@ -2,6 +2,8 @@ package install
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -136,13 +138,60 @@ func TestHooksInstalled_EmptyReturnsFalse(t *testing.T) {
 }
 
 func TestHooksInstalled_FullMergeReturnsTrue(t *testing.T) {
-	merged, err := MergeHooks(nil, "/usr/local/bin/cc-cockpit")
+	bin := filepath.Join(t.TempDir(), "cc-cockpit")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := MergeHooks(nil, bin)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ok, err := HooksInstalled(merged)
 	if err != nil || !ok {
 		t.Errorf("expected (true, nil) after MergeHooks, got (ok=%v, err=%v)", ok, err)
+	}
+}
+
+func TestHooksInstalled_DeadCockpitPathReturnsFalse(t *testing.T) {
+	merged, err := MergeHooks(nil, "/tmp/definitely-missing-cc-cockpit/cc-cockpit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := HooksInstalled(merged)
+	if err != nil || ok {
+		t.Errorf("dead hook binary: got (ok=%v, err=%v), want (false, nil)", ok, err)
+	}
+}
+
+func TestEnsureHooks_RewritesDeadCockpitHookToPathBinary(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "cc-cockpit")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	dead := "/tmp/definitely-missing-cc-cockpit/cc-cockpit"
+	merged, err := MergeHooks(nil, dead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, merged, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureHooks(settingsPath); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(updated), dead) {
+		t.Fatalf("dead hook path was not replaced:\n%s", updated)
+	}
+	if !strings.Contains(string(updated), bin+" hook SessionStart") {
+		t.Fatalf("expected hook to use PATH binary %q, got:\n%s", bin, updated)
 	}
 }
 

@@ -14,9 +14,10 @@ func TestBuild_SessionStart_PullsFromEnvAndPayload(t *testing.T) {
 		PaneID:               "%42",
 	}
 	payload := map[string]any{
-		"cwd":    "/repos/api",
-		"source": "startup",
-		"model":  "claude-opus",
+		"cwd":             "/repos/api",
+		"source":          "startup",
+		"model":           "claude-opus",
+		"transcript_path": "/home/gio/.claude/projects/api/sid1.jsonl",
 	}
 	got := Build("SessionStart", "sid1", payload, env)
 	if got == nil {
@@ -34,6 +35,9 @@ func TestBuild_SessionStart_PullsFromEnvAndPayload(t *testing.T) {
 	}
 	if p["pane_id"] != "%42" {
 		t.Errorf("pane_id: got %v, want %%42", p["pane_id"])
+	}
+	if p["transcript_path"] != "/home/gio/.claude/projects/api/sid1.jsonl" {
+		t.Errorf("transcript_path: got %v", p["transcript_path"])
 	}
 	related := p["declared_related_repos"].([]string)
 	if !reflect.DeepEqual(related, []string{"web", "infra"}) {
