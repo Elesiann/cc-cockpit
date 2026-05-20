@@ -43,8 +43,11 @@ func TestRender_HeaderCounts(t *testing.T) {
 	if !strings.Contains(first, "active=3") {
 		t.Errorf("header active count: %q", first)
 	}
-	if !strings.Contains(first, "▶ 1") || !strings.Contains(first, "● 1") || !strings.Contains(first, "◯ 1") {
-		t.Errorf("header per-status glyphs (expected space between glyph and digit): %q", first)
+	// Header consolidates the 7 reducer statuses into 3 buckets: busy / wait /
+	// idle (see statusBucket). Fixture has 1 running + 1 waiting_input + 1 idle
+	// → expect 1 in each bucket emoji.
+	if !strings.Contains(first, "🔧 1") || !strings.Contains(first, "⏸️ 1") || !strings.Contains(first, "💤 1") {
+		t.Errorf("header per-bucket emoji (expected `🔧 1 ⏸️ 1 💤 1`): %q", first)
 	}
 	if !strings.Contains(first, "ended=1") {
 		t.Errorf("header ended: %q", first)
@@ -106,8 +109,9 @@ func TestRender_ActiveSectionMarker_ShowsCount(t *testing.T) {
 		t.Errorf("expected active section marker with count, got:\n%s", frame)
 	}
 	// Data rows should be indented (consistent with ended footer style).
-	if !strings.Contains(frame, "  ▶ ") && !strings.Contains(frame, "  ◯ ") {
-		t.Errorf("expected indented data rows, got:\n%s", frame)
+	// Status uses emoji glyphs now: 🔧 (running) or 💤 (idle).
+	if !strings.Contains(frame, "  🔧 ") && !strings.Contains(frame, "  💤 ") {
+		t.Errorf("expected indented data rows with emoji glyph, got:\n%s", frame)
 	}
 }
 
@@ -226,7 +230,7 @@ func TestRender_CommandsFooter_AlwaysVisible(t *testing.T) {
 	}
 }
 
-func TestRender_StaleFlag_OnRunningOnly(t *testing.T) {
+func TestRender_StaleFlag_OnMidTurnStatesOnly(t *testing.T) {
 	now := time.Date(2026, 4, 20, 16, 0, 0, 0, time.UTC)
 	// 20 minutes ago — past StaleAfter (15m).
 	staleTS := "2026-04-20T15:40:00Z"
@@ -234,14 +238,19 @@ func TestRender_StaleFlag_OnRunningOnly(t *testing.T) {
 	freshTS := "2026-04-20T15:55:00Z"
 
 	cases := []struct {
-		name        string
-		status      string
-		lastAct     string
-		wantStaleQ  bool
+		name       string
+		status     string
+		lastAct    string
+		wantStaleQ bool
 	}{
+		// Mid-turn states (we expect events to keep flowing) — quiet = suspect.
 		{"running + old", state.StatusRunning, staleTS, true},
 		{"running + fresh", state.StatusRunning, freshTS, false},
+		{"thinking + old", state.StatusThinking, staleTS, true},
+		{"processing + old", state.StatusProcessing, staleTS, true},
+		// Stable / steady-state — quiet is by design, no flag.
 		{"waiting_input + old", state.StatusWaitingInput, staleTS, false},
+		{"completed + old", state.StatusCompleted, staleTS, false},
 		{"idle + old", state.StatusIdle, staleTS, false},
 	}
 	for _, c := range cases {
@@ -251,6 +260,57 @@ func TestRender_StaleFlag_OnRunningOnly(t *testing.T) {
 		if hasQ != c.wantStaleQ {
 			t.Errorf("%s: shortStatusWithStale=%q, hasQ=%v, want=%v", c.name, got, hasQ, c.wantStaleQ)
 		}
+	}
+}
+
+func TestRender_CompletedDecaysToIdleAfter10Min(t *testing.T) {
+	// `completed` is a reducer status; the render layer rewrites it to `idle`
+	// once LastActivity is older than IdleAfterCompleted (10m). The reducer
+	// itself stays event-pure — only the display changes.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	fresh := sessAt(state.StatusCompleted, "2026-05-17T11:55:00Z", "2026-05-17T11:55:00Z", "api", "t") // 5m
+	old := sessAt(state.StatusCompleted, "2026-05-17T11:45:00Z", "2026-05-17T11:45:00Z", "api", "t")   // 15m
+
+	if got := effectiveStatus(fresh, now); got != state.StatusCompleted {
+		t.Errorf("fresh completed (5m): got %q, want completed (still within 10m grace)", got)
+	}
+	if got := effectiveStatus(old, now); got != state.StatusIdle {
+		t.Errorf("aged completed (15m): got %q, want idle (past IdleAfterCompleted)", got)
+	}
+	// Glyph follows the effective status — aged-completed gets 💤, not ✅.
+	if g := glyph(effectiveStatus(old, now)); g != "💤" {
+		t.Errorf("aged completed glyph: got %q, want 💤", g)
+	}
+}
+
+func TestRender_RunningShowsCurrentToolInstead(t *testing.T) {
+	// When a tool is mid-execution the STATUS column shows the tool name
+	// (the 🔧 glyph already conveys "running tool"), e.g. `🔧 Bash`.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	s := sessAt(state.StatusRunning, "2026-05-17T11:59:55Z", "2026-05-17T11:59:55Z", "api", "task")
+	s.CurrentTool = "Bash"
+
+	st := state.State{Sessions: map[string]*state.Session{"sid-a": s}}
+	frame := Render(st, "ws", now)
+	if !strings.Contains(frame, "🔧 Bash") {
+		t.Errorf("expected `🔧 Bash` in frame for running+tool session, got:\n%s", frame)
+	}
+	// And the generic `running` word should NOT appear in that row.
+	if strings.Contains(frame, "🔧 running") {
+		t.Errorf("running+tool row should not say `running` — tool name replaces it:\n%s", frame)
+	}
+}
+
+func TestRender_RunningWithoutToolFallsBackToGenericLabel(t *testing.T) {
+	// Edge case: status=running but CurrentTool empty (e.g. session revived
+	// from a synthetic SessionEnd before any PreToolUse fired). The STATUS
+	// column shows the generic word so the row isn't bare.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	s := sessAt(state.StatusRunning, "2026-05-17T11:59:55Z", "2026-05-17T11:59:55Z", "api", "task")
+	st := state.State{Sessions: map[string]*state.Session{"sid-a": s}}
+	frame := Render(st, "ws", now)
+	if !strings.Contains(frame, "🔧 running") {
+		t.Errorf("expected `🔧 running` fallback when CurrentTool is empty, got:\n%s", frame)
 	}
 }
 
@@ -399,17 +459,21 @@ func TestWatchFooter_HasExpectedCheatsheetEntries(t *testing.T) {
 		"open ",
 		"close <ws> --yes",
 		"Ctrl-C",
-		"legend: `?` after status",
+		"legend:",
+		"? = stale",
 	}
 	for _, w := range wants {
 		if !strings.Contains(footer, w) {
 			t.Errorf("watch footer missing %q\nFooter:\n%s", w, footer)
 		}
 	}
-	// Every line ≤ 80 cols (dashboard pane width contract).
+	// Every line ≤ 80 visible cols. utf8.RuneCountInString matches the rest
+	// of this test file's convention for terminal width (and treats each
+	// emoji as 1 rune — close enough since the legend lives below the table
+	// where exact alignment doesn't matter).
 	for i, line := range strings.Split(footer, "\n") {
-		if len(line) > 80 {
-			t.Errorf("watch footer line %d > 80 cols (%d): %q", i, len(line), line)
+		if w := utf8.RuneCountInString(line); w > 80 {
+			t.Errorf("watch footer line %d > 80 cols (%d): %q", i, w, line)
 		}
 	}
 }

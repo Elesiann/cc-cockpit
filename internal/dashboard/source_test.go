@@ -43,8 +43,10 @@ func TestSingleSource_Sample_ReadsAndReduces(t *testing.T) {
 	if !ok {
 		t.Fatalf("sid-a not reduced: %+v", samples[0].State.Sessions)
 	}
-	if sess.Status != state.StatusRunning {
-		t.Errorf("status: got %q want running", sess.Status)
+	// UserPromptSubmit moves the session to `thinking` under the granular
+	// state machine (Claude reasoning about the prompt before any tool call).
+	if sess.Status != state.StatusThinking {
+		t.Errorf("status: got %q want thinking", sess.Status)
 	}
 }
 

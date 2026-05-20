@@ -12,10 +12,19 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
-// StaleAfter is how long a `running` session may go without any new event
-// before the dashboard flags it as probably-crashed. Only applied to running;
-// idle/waiting_input are already "nothing happening" states.
+// StaleAfter is how long a mid-turn session (running / thinking / processing)
+// may go without any new event before the dashboard flags it as
+// probably-crashed. waiting_input / completed / idle are quiet-by-design
+// states, so flagging them adds no signal.
 const StaleAfter = 15 * time.Minute
+
+// IdleAfterCompleted is how long a `completed` session can stay quiet before
+// the dashboard re-labels it as `idle` (purely a render-time derivation —
+// the reducer never writes "idle" except on a fresh SessionStart). Picked
+// at 10 min so a Claude waiting for the next prompt loses the green "✅"
+// signal once it's clearly settled, but still shows "completed" for a turn
+// the user just wrapped up.
+const IdleAfterCompleted = 10 * time.Minute
 
 // EndedFooterMaxAge drops ended-session rows older than this from the
 // "ended (last N)" footer so the dashboard doesn't keep day-old corpses
@@ -69,25 +78,50 @@ func RenderMultiWithMetas(samples []TaggedState, title string, now time.Time, me
 	return b.String()
 }
 
+// statusBucket maps a granular reducer status (running / thinking /
+// processing / waiting / completed / idle) into one of three header buckets:
+//
+//	busy → running / thinking / processing  (Claude is actively working)
+//	wait → waiting_input                    (needs operator attention)
+//	idle → completed / idle                 (settled, awaiting next user move)
+//
+// Keeps the header at 3 emoji counters even though the per-row STATUS column
+// shows the full granularity — 7 separate counters would cramp 80-col WSL.
+func statusBucket(s string) (busy, wait, idle bool) {
+	switch s {
+	case state.StatusRunning, state.StatusThinking, state.StatusProcessing:
+		return true, false, false
+	case state.StatusWaitingInput:
+		return false, true, false
+	case state.StatusCompleted, state.StatusIdle:
+		return false, false, true
+	}
+	return false, false, false
+}
+
 func renderHeader(st state.State, ws string) string {
-	var active, running, waiting, idle, ended int
+	var active, busy, wait, idle, ended int
 	for _, s := range st.Sessions {
-		switch s.Status {
-		case state.StatusRunning:
-			running++
+		if s.Status == state.StatusEnded {
+			ended++
+			continue
+		}
+		b, w, i := statusBucket(s.Status)
+		if b {
+			busy++
 			active++
-		case state.StatusWaitingInput:
-			waiting++
+		}
+		if w {
+			wait++
 			active++
-		case state.StatusIdle:
+		}
+		if i {
 			idle++
 			active++
-		case state.StatusEnded:
-			ended++
 		}
 	}
-	h := fmt.Sprintf("── %s ──  active=%d  ▶ %d  ● %d  ◯ %d  ended=%d ──",
-		truncRunes(ws, 16), active, running, waiting, idle, ended)
+	h := fmt.Sprintf("── %s ──  active=%d  🔧 %d  ⏸️ %d  💤 %d  ended=%d ──",
+		truncRunes(ws, 16), active, busy, wait, idle, ended)
 	if st.DroppedEvents > 0 {
 		h += fmt.Sprintf("\n⚠ %d malformed events skipped", st.DroppedEvents)
 	}
@@ -95,27 +129,31 @@ func renderHeader(st state.State, ws string) string {
 }
 
 func renderMultiHeader(samples []TaggedState, title string) string {
-	var active, running, waiting, idle, ended, dropped int
+	var active, busy, wait, idle, ended, dropped int
 	for _, s := range samples {
 		for _, sess := range s.State.Sessions {
-			switch sess.Status {
-			case state.StatusRunning:
-				running++
+			if sess.Status == state.StatusEnded {
+				ended++
+				continue
+			}
+			b, w, i := statusBucket(sess.Status)
+			if b {
+				busy++
 				active++
-			case state.StatusWaitingInput:
-				waiting++
+			}
+			if w {
+				wait++
 				active++
-			case state.StatusIdle:
+			}
+			if i {
 				idle++
 				active++
-			case state.StatusEnded:
-				ended++
 			}
 		}
 		dropped += s.State.DroppedEvents
 	}
-	h := fmt.Sprintf("── %s ──  active=%d  ▶ %d  ● %d  ◯ %d  ended=%d ──",
-		truncRunes(title, 32), active, running, waiting, idle, ended)
+	h := fmt.Sprintf("── %s ──  active=%d  🔧 %d  ⏸️ %d  💤 %d  ended=%d ──",
+		truncRunes(title, 32), active, busy, wait, idle, ended)
 	if dropped > 0 {
 		h += fmt.Sprintf("\n⚠ %d malformed events skipped", dropped)
 	}
@@ -159,7 +197,7 @@ func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMe
 		repo := truncRunes(sessionRepoLabel(s), 18)
 		task := truncRunes(sessionTaskLabel(s, metas[r.sid]), 30)
 		fmt.Fprintf(tw, "  %s %s\t%s\t%s\t%s\t%s\n",
-			glyph(s.Status), shortStatusWithStale(s, now),
+			glyph(effectiveStatus(s, now)), shortStatusWithStale(s, now),
 			shortSID(r.sid),
 			repo,
 			task,
@@ -206,7 +244,7 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 		repo := truncRunes(sessionRepoLabel(s), 16)
 		task := truncRunes(sessionTaskLabel(s, metas[r.sid]), 26)
 		fmt.Fprintf(tw, "  %s %s\t%s\t%s\t%s\t%s\t%s\n",
-			glyph(s.Status), shortStatusWithStale(s, now),
+			glyph(effectiveStatus(s, now)), shortStatusWithStale(s, now),
 			shortSID(r.sid),
 			ws,
 			repo,
@@ -355,26 +393,32 @@ func renderWatchFooter() string {
 		"  open                       open the cockpit for cwd's workspace",
 		"  close <ws> --yes           kill a workspace's cockpit",
 		"  Ctrl-C                     exit watch",
-		"  legend: `?` after status = no activity 15m+ (possibly crashed)",
+		"  legend: 🔧 tool 🤔 think ⏳ proc ⏸️ wait ✅ done 💤 idle  ? = stale 15m+",
 	}, "\n")
 }
 
 func glyph(status string) string {
 	switch status {
 	case state.StatusRunning:
-		return "▶"
+		return "🔧"
+	case state.StatusThinking:
+		return "🤔"
+	case state.StatusProcessing:
+		return "⏳"
 	case state.StatusWaitingInput:
-		return "●"
+		return "⏸️"
+	case state.StatusCompleted:
+		return "✅"
 	case state.StatusIdle:
-		return "◯"
+		return "💤"
 	case state.StatusEnded:
 		return "◼"
 	}
 	return "?"
 }
 
-// shortStatus is the table-display name (waiting_input → waiting, since the
-// underscore-form spills past 60 cols once tabwriter pads the column).
+// shortStatus is the table-display name. waiting_input collapses to "waiting"
+// for column-width reasons; everything else renders as-is (all ≤ 10 chars).
 func shortStatus(s string) string {
 	if s == state.StatusWaitingInput {
 		return "waiting"
@@ -382,21 +426,56 @@ func shortStatus(s string) string {
 	return s
 }
 
-// shortStatusWithStale appends `?` to running sessions that have gone
-// quiet for StaleAfter. The reducer never sees this — it's a render-time
-// derivation only.
-func shortStatusWithStale(s *state.Session, now time.Time) string {
-	if isStale(s, now) {
-		return shortStatus(s.Status) + "?"
+// effectiveStatus applies render-time derivations to the raw reducer status:
+//   - completed + LastActivity older than IdleAfterCompleted → idle
+//
+// The reducer stays event-pure; long-quiet decay is a display concern.
+func effectiveStatus(s *state.Session, now time.Time) string {
+	if s.Status != state.StatusCompleted || s.LastActivity == "" {
+		return s.Status
 	}
-	return shortStatus(s.Status)
+	t, err := time.Parse(time.RFC3339, s.LastActivity)
+	if err != nil {
+		return s.Status
+	}
+	if now.Sub(t) > IdleAfterCompleted {
+		return state.StatusIdle
+	}
+	return s.Status
 }
 
-// isStale reports whether a running session looks dead. Only `running`
-// gets the stale treatment — idle/waiting_input are quiet by design, so
-// flagging them adds no signal.
+// statusText is the text label for a session's STATUS column. When a tool
+// is currently executing (StatusRunning + CurrentTool set), the tool name
+// replaces the generic "running" word — the 🔧 glyph already conveys
+// "running tool", so "🔧 Bash" reads cleanly without "running:" noise.
+// Falls back to shortStatus(effectiveStatus(...)) otherwise.
+func statusText(s *state.Session, now time.Time) string {
+	eff := effectiveStatus(s, now)
+	if eff == state.StatusRunning && s.CurrentTool != "" {
+		return truncRunes(s.CurrentTool, 12)
+	}
+	return shortStatus(eff)
+}
+
+// shortStatusWithStale composes the table-cell text: status (with tool name
+// or idle-decay applied) plus a trailing `?` when the session is mid-turn
+// and has been quiet past StaleAfter.
+func shortStatusWithStale(s *state.Session, now time.Time) string {
+	txt := statusText(s, now)
+	if isStale(s, now) {
+		return txt + "?"
+	}
+	return txt
+}
+
+// isStale reports whether a mid-turn session looks dead. Mid-turn means
+// running / thinking / processing — states where we expect events to keep
+// flowing. waiting_input / completed / idle / ended are stable, so flagging
+// them adds no signal.
 func isStale(s *state.Session, now time.Time) bool {
-	if s.Status != state.StatusRunning {
+	switch s.Status {
+	case state.StatusRunning, state.StatusThinking, state.StatusProcessing:
+	default:
 		return false
 	}
 	if s.LastActivity == "" {
