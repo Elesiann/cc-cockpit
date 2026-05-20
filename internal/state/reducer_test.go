@@ -29,7 +29,9 @@ THIS LINE IS NOT JSON
 
 func TestReducer_TolerateMalformed(t *testing.T) {
 	// smoke.sh §[9]: dropped=4 (not-json + missing-session_id + array-payload + bad-date),
-	// s1 ends up idle (Stop after SessionStart).
+	// s1 ends up completed (Stop after SessionStart — under the new granular
+	// state machine, Stop sets `completed`; the render layer derives `idle`
+	// after IdleAfterCompleted has elapsed).
 	st := Reduce(strings.NewReader(fixtureMalformed))
 	if st.DroppedEvents != 4 {
 		t.Errorf("dropped_events: got %d, want 4", st.DroppedEvents)
@@ -38,8 +40,8 @@ func TestReducer_TolerateMalformed(t *testing.T) {
 	if !ok {
 		t.Fatalf("session s1 missing")
 	}
-	if s1.Status != "idle" {
-		t.Errorf("s1.status: got %q, want idle", s1.Status)
+	if s1.Status != StatusCompleted {
+		t.Errorf("s1.status: got %q, want completed", s1.Status)
 	}
 	if _, ok := st.Sessions["bad"]; ok {
 		t.Errorf("session 'bad' should have been dropped (array payload)")
@@ -51,15 +53,16 @@ func TestReducer_TolerateMalformed(t *testing.T) {
 
 func TestReducer_TransientNotificationCollapses(t *testing.T) {
 	// smoke.sh §[12]: Notification then PostToolUse within one tick collapses
-	// back to running. Bell-on-delta still fires (tested in dashboard package);
-	// here we just verify the reducer's collapsed state.
+	// back to a non-waiting state. Under the granular state machine, that's
+	// `processing` (PostToolUse from waiting_input → processing). Bell-on-delta
+	// still fires (tested in dashboard package).
 	st := Reduce(strings.NewReader(fixtureTransient))
 	s1, ok := st.Sessions["s1"]
 	if !ok {
 		t.Fatalf("session s1 missing")
 	}
-	if s1.Status != "running" {
-		t.Errorf("s1.status: got %q, want running", s1.Status)
+	if s1.Status != StatusProcessing {
+		t.Errorf("s1.status: got %q, want processing", s1.Status)
 	}
 }
 
@@ -71,8 +74,11 @@ func TestReducer_DismissalRevivable(t *testing.T) {
 	if a == nil || b == nil {
 		t.Fatalf("sessions missing: a=%v b=%v", a, b)
 	}
-	if a.Status != "running" {
-		t.Errorf("a.status: got %q, want running (synthetic-end + later event = revived)", a.Status)
+	// Revival sets status=running as a generic "alive again" default, then the
+	// event handler refines it. The reviving event here is UserPromptSubmit, so
+	// the final status is `thinking`.
+	if a.Status != StatusThinking {
+		t.Errorf("a.status: got %q, want thinking (synthetic-end + UserPromptSubmit = revived → thinking)", a.Status)
 	}
 	if b.Status != "ended" {
 		t.Errorf("b.status: got %q, want ended (natural-end is terminal)", b.Status)
@@ -128,8 +134,8 @@ func TestReducer_OutOfOrderSeqs(t *testing.T) {
 	if !ok {
 		t.Fatalf("s1 missing")
 	}
-	if s1.Status != "idle" {
-		t.Errorf("s1.status: got %q, want idle (Stop must apply after SessionStart)", s1.Status)
+	if s1.Status != StatusCompleted {
+		t.Errorf("s1.status: got %q, want completed (Stop must apply after SessionStart)", s1.Status)
 	}
 }
 
@@ -142,18 +148,80 @@ func TestReducer_PermissionRequestEntersWaiting(t *testing.T) {
 	}
 }
 
-func TestReducer_PostToolUseUpdatesActivityWithoutResettingIdle(t *testing.T) {
-	// PostToolUse only switches status if currently waiting_input. From idle, it
-	// just bumps last_activity (matches reduce-state.sh:101-104).
+func TestReducer_PostToolUseDoesNotPromoteCompleted(t *testing.T) {
+	// Defensive: a stray PostToolUse arriving after Stop (Claude finished its
+	// turn, then a delayed hook lands) must not promote the session back to
+	// `processing`. We only update last_activity. Mirrors the pre-0.7 behavior
+	// where PostToolUse from idle stayed idle.
 	input := `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
 {"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"Stop","session_id":"s1","payload":{}}
 {"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"PostToolUse","session_id":"s1","payload":{"tool_name":"W"}}`
 	st := Reduce(strings.NewReader(input))
-	if st.Sessions["s1"].Status != "idle" {
-		t.Errorf("PostToolUse from idle must keep idle, got %q", st.Sessions["s1"].Status)
+	if st.Sessions["s1"].Status != StatusCompleted {
+		t.Errorf("PostToolUse after Stop must keep completed, got %q", st.Sessions["s1"].Status)
 	}
 	if st.Sessions["s1"].LastActivity != "2026-04-20T15:00:02Z" {
 		t.Errorf("last_activity should advance to PostToolUse time, got %q", st.Sessions["s1"].LastActivity)
+	}
+}
+
+func TestReducer_PostToolUseFromIdleDoesNotPromote(t *testing.T) {
+	// Defensive: PostToolUse arriving on a freshly-started session (no
+	// UserPromptSubmit yet) must not falsely flip status to `processing`.
+	// Claude Code 2.x occasionally emits boot-time tool events.
+	input := `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"PostToolUse","session_id":"s1","payload":{"tool_name":"Read"}}`
+	st := Reduce(strings.NewReader(input))
+	if st.Sessions["s1"].Status != StatusIdle {
+		t.Errorf("PostToolUse from idle must keep idle, got %q", st.Sessions["s1"].Status)
+	}
+}
+
+func TestReducer_PreToolUseFromIdleDoesNotPromote(t *testing.T) {
+	// Same defensive rule for PreToolUse — without a prior UserPromptSubmit,
+	// a session shouldn't jump to `running` (Claude's mid-turn state).
+	input := `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"PreToolUse","session_id":"s1","payload":{"tool_name":"Bash"}}`
+	st := Reduce(strings.NewReader(input))
+	s1 := st.Sessions["s1"]
+	if s1.Status != StatusIdle {
+		t.Errorf("PreToolUse from idle must keep idle, got %q", s1.Status)
+	}
+	if s1.CurrentTool != "" {
+		t.Errorf("CurrentTool must stay empty when transition is suppressed, got %q", s1.CurrentTool)
+	}
+}
+
+func TestReducer_FullTurnGranularStates(t *testing.T) {
+	// Walks through one complete turn — every transition along the way.
+	input := `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"UserPromptSubmit","session_id":"s1","payload":{"prompt_preview":"hi"}}
+{"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"PreToolUse","session_id":"s1","payload":{"tool_name":"Bash"}}
+{"seq":4,"wall_clock_iso8601":"2026-04-20T15:00:03Z","event_type":"PostToolUse","session_id":"s1","payload":{"tool_name":"Bash"}}
+{"seq":5,"wall_clock_iso8601":"2026-04-20T15:00:04Z","event_type":"Stop","session_id":"s1","payload":{}}`
+	st := Reduce(strings.NewReader(input))
+	s1 := st.Sessions["s1"]
+	if s1.Status != StatusCompleted {
+		t.Errorf("final status: got %q, want completed", s1.Status)
+	}
+	if s1.CurrentTool != "" {
+		t.Errorf("CurrentTool must be cleared after PostToolUse/Stop, got %q", s1.CurrentTool)
+	}
+}
+
+func TestReducer_PreToolUseSetsCurrentTool(t *testing.T) {
+	// Captures the tool name on the session so the dashboard can show e.g.
+	// `🔧 Bash` instead of generic `running`.
+	input := `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"UserPromptSubmit","session_id":"s1","payload":{"prompt_preview":"x"}}
+{"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"PreToolUse","session_id":"s1","payload":{"tool_name":"WebFetch"}}`
+	st := Reduce(strings.NewReader(input))
+	s1 := st.Sessions["s1"]
+	if s1.Status != StatusRunning {
+		t.Errorf("status after PreToolUse: got %q, want running", s1.Status)
+	}
+	if s1.CurrentTool != "WebFetch" {
+		t.Errorf("CurrentTool: got %q, want WebFetch", s1.CurrentTool)
 	}
 }
 

@@ -9,15 +9,31 @@ const (
 	EventUserPromptSubmit  = "UserPromptSubmit"
 	EventPermissionRequest = "PermissionRequest"
 	EventNotification      = "Notification"
+	EventPreToolUse        = "PreToolUse"
 	EventPostToolUse       = "PostToolUse"
 	EventStop              = "Stop"
 	EventSessionEnd        = "SessionEnd"
 )
 
-// Reduced session statuses.
+// Reduced session statuses. Granular states derived from the event sequence:
+//
+//	idle        → SessionStart, no UserPromptSubmit yet (fresh boot)
+//	thinking    → UserPromptSubmit received, Claude is reasoning
+//	running     → PreToolUse seen, tool currently executing (see CurrentTool)
+//	processing  → PostToolUse seen, Claude is reading the result
+//	waiting_input → Notification (idle_prompt|permission_prompt) or PermissionRequest
+//	completed   → Stop event, Claude finished its turn
+//	ended       → SessionEnd (real or synthetic)
+//
+// `idle` as a long-quiet-completed state is a render-time derivation
+// (StatusCompleted + LastActivity older than IdleAfterCompleted), not a
+// reducer state — keeping the reducer pure-from-events.
 const (
 	StatusRunning      = "running"
+	StatusThinking     = "thinking"
+	StatusProcessing   = "processing"
 	StatusWaitingInput = "waiting_input"
+	StatusCompleted    = "completed"
 	StatusIdle         = "idle"
 	StatusEnded        = "ended"
 )
@@ -46,6 +62,7 @@ type Session struct {
 	StartedAt            string          `json:"started_at"`
 	LastActivity         string          `json:"last_activity"`
 	LastPromptPreview    json.RawMessage `json:"last_prompt_preview"`
+	CurrentTool          string          `json:"current_tool,omitempty"`
 	ResumedAt            string          `json:"resumed_at,omitempty"`
 	EndedAt              json.RawMessage `json:"ended_at,omitempty"`
 	Dismissed            *bool           `json:"dismissed,omitempty"`

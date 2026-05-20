@@ -80,10 +80,13 @@ func applyEvent(state *State, ev *Event) {
 	state.LastSeq = ev.Seq
 
 	// Pre-revive: a dismissed session that emits any non-SessionEnd event
-	// comes back as running.
+	// comes back as running. The switch below refines the status from the
+	// event's semantics (e.g. UserPromptSubmit → thinking) — running is
+	// just the generic "alive again" default.
 	if sess, ok := state.Sessions[ev.SessionID]; ok && isDismissed(sess) && ev.EventType != EventSessionEnd {
 		f := false
 		sess.Status = StatusRunning
+		sess.CurrentTool = ""
 		sess.Dismissed = &f
 		sess.RevivedAt = ev.WallClockISO8601
 		sess.EndedAt = jsonNull
@@ -106,7 +109,8 @@ func applyEvent(state *State, ev *Event) {
 		if !ok || sess.Status == StatusEnded {
 			return
 		}
-		sess.Status = StatusRunning
+		sess.Status = StatusThinking
+		sess.CurrentTool = ""
 		sess.LastActivity = ev.WallClockISO8601
 		var p struct {
 			PromptPreview json.RawMessage `json:"prompt_preview"`
@@ -125,13 +129,35 @@ func applyEvent(state *State, ev *Event) {
 		sess.Status = StatusWaitingInput
 		sess.LastActivity = ev.WallClockISO8601
 
+	case EventPreToolUse:
+		sess, ok := state.Sessions[ev.SessionID]
+		if !ok || sess.Status == StatusEnded {
+			return
+		}
+		var p struct {
+			ToolName string `json:"tool_name"`
+		}
+		_ = json.Unmarshal(ev.Payload, &p)
+		// Defensive: don't promote a never-used or already-finished session to
+		// running on a stray PreToolUse. Mid-turn states (thinking/processing/
+		// waiting_input/running) all legitimately transition to running.
+		if sess.Status != StatusIdle && sess.Status != StatusCompleted {
+			sess.Status = StatusRunning
+			sess.CurrentTool = p.ToolName
+		}
+		sess.LastActivity = ev.WallClockISO8601
+
 	case EventPostToolUse:
 		sess, ok := state.Sessions[ev.SessionID]
 		if !ok {
 			return
 		}
-		if sess.Status == StatusWaitingInput {
-			sess.Status = StatusRunning
+		// Same defensive rule as PreToolUse — boot-time PostToolUse on a fresh
+		// idle session (see TestReducer_PostToolUseUpdatesActivityWithoutResettingIdle)
+		// shouldn't fake a processing state.
+		if sess.Status != StatusIdle && sess.Status != StatusCompleted && sess.Status != StatusEnded {
+			sess.Status = StatusProcessing
+			sess.CurrentTool = ""
 		}
 		sess.LastActivity = ev.WallClockISO8601
 
@@ -140,7 +166,8 @@ func applyEvent(state *State, ev *Event) {
 		if !ok || sess.Status == StatusEnded {
 			return
 		}
-		sess.Status = StatusIdle
+		sess.Status = StatusCompleted
+		sess.CurrentTool = ""
 		sess.LastActivity = ev.WallClockISO8601
 
 	case EventSessionEnd:
@@ -150,6 +177,7 @@ func applyEvent(state *State, ev *Event) {
 		}
 		ts, _ := json.Marshal(ev.WallClockISO8601)
 		sess.Status = StatusEnded
+		sess.CurrentTool = ""
 		sess.EndedAt = ts
 		sess.LastActivity = ev.WallClockISO8601
 
