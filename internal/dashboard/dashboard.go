@@ -62,6 +62,7 @@ func Run(src Source, opts Options) error {
 	var prevFrame string
 	prevCurrentJSON := make(map[string][]byte)
 	prevPaneColor := make(map[string]string)
+	recaps := newRecapCache()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -94,13 +95,14 @@ func Run(src Source, opts Options) error {
 
 		now := time.Now()
 		metas := LoadSessionMetas(home)
+		recapTexts := recaps.load(samples)
 		var frame string
 		if src.IsMulti() {
-			frame = RenderMultiWithMetas(samples, src.HeaderName(samples), now, metas)
+			frame = RenderMultiWithMetasAndRecaps(samples, src.HeaderName(samples), now, metas, recapTexts)
 		} else if len(samples) > 0 {
-			frame = RenderWithMetas(samples[0].State, src.HeaderName(samples), now, metas)
+			frame = RenderWithMetasAndRecaps(samples[0].State, src.HeaderName(samples), now, metas, recapTexts)
 		} else {
-			frame = RenderWithMetas(state.State{}, src.HeaderName(samples), now, metas)
+			frame = RenderWithMetasAndRecaps(state.State{}, src.HeaderName(samples), now, metas, recapTexts)
 		}
 		if stageErr != "" {
 			frame = "⚠ DASHBOARD STAGE FAILED: " + stageErr + " — displayed state may be stale.\n" +

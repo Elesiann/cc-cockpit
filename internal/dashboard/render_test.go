@@ -556,6 +556,34 @@ func TestRenderWithMetas_AppliesNameAndColor(t *testing.T) {
 	}
 }
 
+func TestRenderMultiWithRecaps_ShowsSubtleOneLineRecapOnlyForIdleSessions(t *testing.T) {
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	samples := []TaggedState{{
+		Name: "gio",
+		State: state.State{Sessions: map[string]*state.Session{
+			"idle1234":    sessAt(state.StatusIdle, "2026-05-20T11:40:00Z", "2026-05-20T11:45:00Z", "devportal-platform", "last mile"),
+			"busy4567":    sessAt(state.StatusProcessing, "2026-05-20T11:50:00Z", "2026-05-20T11:59:00Z", "cc-cockpit", "render recap"),
+			"waiting8901": sessAt(state.StatusWaitingInput, "2026-05-20T11:55:00Z", "2026-05-20T11:59:30Z", "api", "needs input"),
+		}},
+	}}
+	recaps := map[string]string{
+		"idle1234":    "Goal: clear migration pendencies. Done: matrix-sync PR #29 and Notion §7 results. Next: decide whether UPGRADING fixes fold into plugin-clarity.",
+		"busy4567":    "Busy recap must not render.",
+		"waiting8901": "Waiting recap must not render.",
+	}
+
+	frame := RenderMultiWithMetasAndRecaps(samples, "watch", now, nil, recaps)
+	if !strings.Contains(frame, "\033[90m    ↳ recap: Goal: clear migration pendencies.") {
+		t.Fatalf("expected subtle gray one-line recap under idle session, got:\n%s", frame)
+	}
+	if strings.Contains(frame, "  │ ") {
+		t.Fatalf("recap should not expand into continuation lines:\n%s", frame)
+	}
+	if strings.Contains(frame, "Busy recap") || strings.Contains(frame, "Waiting recap") {
+		t.Fatalf("recaps should render only for idle sessions, got:\n%s", frame)
+	}
+}
+
 func TestSessionRepoLabel_PrimaryRepoWins(t *testing.T) {
 	s := &state.Session{
 		PrimaryRepo: json.RawMessage(`"api"`),

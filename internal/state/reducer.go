@@ -96,10 +96,14 @@ func applyEvent(state *State, ev *Event) {
 	case EventSessionStart:
 		sess, ok := state.Sessions[ev.SessionID]
 		if ok {
-			sess.LastActivity = ev.WallClockISO8601
-			if sess.ResumedAt == "" {
-				sess.ResumedAt = ev.WallClockISO8601
-			}
+			startedAt := sess.StartedAt
+			fresh := newSessionFromStart(ev)
+			fresh.StartedAt = startedAt
+			fresh.ResumedAt = ev.WallClockISO8601
+			fresh.EndedAt = jsonNull
+			f := false
+			fresh.Dismissed = &f
+			state.Sessions[ev.SessionID] = fresh
 			return
 		}
 		state.Sessions[ev.SessionID] = newSessionFromStart(ev)
@@ -203,6 +207,7 @@ func newSessionFromStart(ev *Event) *Session {
 		DeclaredRelatedRepos json.RawMessage `json:"declared_related_repos"`
 		TaskName             json.RawMessage `json:"task_name"`
 		Cwd                  json.RawMessage `json:"cwd"`
+		TranscriptPath       json.RawMessage `json:"transcript_path"`
 		PaneID               json.RawMessage `json:"pane_id"`
 		LegacyPaneID         json.RawMessage `json:"zellij_pane_id"` // pre-v0.3 logs
 	}
@@ -224,6 +229,7 @@ func newSessionFromStart(ev *Event) *Session {
 		DeclaredRelatedRepos: defaultNull(p.DeclaredRelatedRepos),
 		TaskName:             defaultNull(p.TaskName),
 		Cwd:                  defaultNull(p.Cwd),
+		TranscriptPath:       defaultNull(p.TranscriptPath),
 		PaneID:               defaultNull(p.PaneID),
 		// A freshly-started Claude session is showing its prompt and
 		// waiting for the user to type the first message. Nothing is

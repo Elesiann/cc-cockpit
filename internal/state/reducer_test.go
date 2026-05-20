@@ -66,8 +66,33 @@ func TestReducer_TransientNotificationCollapses(t *testing.T) {
 	}
 }
 
+func TestReducer_ResumeAfterNaturalEndReopensSession(t *testing.T) {
+	input := `{"seq":1,"wall_clock_iso8601":"2026-05-19T23:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"api","declared_related_repos":[],"task_name":"old task","cwd":"/old","source":"startup"}}
+{"seq":2,"wall_clock_iso8601":"2026-05-19T23:10:00Z","event_type":"SessionEnd","session_id":"s1","payload":{}}
+{"seq":3,"wall_clock_iso8601":"2026-05-20T12:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"","declared_related_repos":[],"task_name":"","cwd":"/new","source":"resume"}}
+{"seq":4,"wall_clock_iso8601":"2026-05-20T12:01:00Z","event_type":"UserPromptSubmit","session_id":"s1","payload":{"prompt_preview":"back at it"}}`
+
+	st := Reduce(strings.NewReader(input))
+	s := st.Sessions["s1"]
+	if s.Status != StatusThinking {
+		t.Fatalf("status: got %q, want %q after resume + prompt", s.Status, StatusThinking)
+	}
+	if s.LastActivity != "2026-05-20T12:01:00Z" {
+		t.Fatalf("last_activity: got %q", s.LastActivity)
+	}
+	if s.ResumedAt != "2026-05-20T12:00:00Z" {
+		t.Fatalf("resumed_at: got %q", s.ResumedAt)
+	}
+	if string(s.EndedAt) != "null" {
+		t.Fatalf("ended_at: got %s, want null after resume", s.EndedAt)
+	}
+	if got := string(s.Cwd); got != `"/new"` {
+		t.Fatalf("cwd: got %s, want resumed cwd", got)
+	}
+}
+
 func TestReducer_DismissalRevivable(t *testing.T) {
-	// smoke.sh §[13]: synthetic SessionEnd is revivable; natural is terminal.
+	// smoke.sh §[13]: synthetic SessionEnd is revivable; natural is terminal unless a real SessionStart(source=resume) arrives.
 	st := Reduce(strings.NewReader(fixtureDismiss))
 	a := st.Sessions["a"]
 	b := st.Sessions["b"]

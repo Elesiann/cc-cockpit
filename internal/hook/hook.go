@@ -34,6 +34,10 @@ func Build(event, sessionID string, payload map[string]any, env Env) map[string]
 			"pane_id":                pane,
 			"source":                 payload["source"],
 			"model":                  payload["model"],
+			// transcript_path is on every Claude Code hook payload. We
+			// capture it at SessionStart (stable for the session's life)
+			// so the recap reader knows which .jsonl to scan.
+			"transcript_path": payload["transcript_path"],
 		})
 
 	case state.EventUserPromptSubmit:

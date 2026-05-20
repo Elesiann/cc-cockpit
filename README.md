@@ -1,6 +1,6 @@
 # cc-cockpit
 
-**An attention layer for parallel coding agents. One screen to watch every session you've started — across any repos, with any agent tool inside.**
+**An attention layer for parallel coding agents. One screen to watch every session you've started — across any repos, with live status, native Claude Code labels/colors, and short recaps of what happened while you were away.**
 
 [![CI](https://github.com/Elesiann/cc-cockpit/actions/workflows/ci.yml/badge.svg)](https://github.com/Elesiann/cc-cockpit/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Elesiann/cc-cockpit)](https://github.com/Elesiann/cc-cockpit/releases/latest)
@@ -53,18 +53,19 @@ cc-cockpit is the missing **attention layer** between you and N parallel termina
 ## Screenshot
 
 ```
-┌─── cc-cockpit dashboard ───────────┬─── control ────────────────────────┐
-│  cc-cockpit · veecode-saas         │ $ cc-cockpit start api fix bug     │
-│  active=3 (running=2 waiting=1)    │ $                                  │
-│                                    │ $                                  │
-│  STATUS         SID       REPO     │                                    │
-│  ▶ running      a7b2...   api      │                                   │
-│  ● waiting_in   3f1c...   portal   │                                    │
-│  ◯ idle         c90e...   infra    │                                   │
-└────────────────────────────────────┴────────────────────────────────────┘
+┌─── cc-cockpit dashboard ───────────────┬─── control ────────────────────────┐
+│  cc-cockpit · veecode-saas             │ $ start api fix auth bug           │
+│  active=3  🔧 1  ⏸️ 1  💤 1  ended=0   │ $                                  │
+│                                        │ $                                  │
+│  STATUS       SID       REPO     TASK  │                                    │
+│  ⏳ processing a7b2...   api      auth  │                                    │
+│  ⏸️ waiting   3f1c...   portal   review│                                    │
+│  💤 idle      c90e...   infra    ci    │                                    │
+│    ↳ recap: Goal: clear migration debt…│                                    │
+└────────────────────────────────────────┴────────────────────────────────────┘
 ```
 
-(Actual renders include task labels, activity timers, and an `ended` footer.)
+(Actual renders include full task labels, activity timers, `/rename` names, `/color` row coloring, native recaps when available, and an `ended` footer.)
 
 ---
 
@@ -127,7 +128,12 @@ cc-cockpit watch
 
 **You don't need to "set up" anything**: with the hooks installed (`cc-cockpit install`), open `cc-cockpit watch` in any terminal, then start a `claude` session in any other terminal — it appears within one tick. Sessions without a `primary_repo` (interactive ones) show the basename of their cwd in the REPO column.
 
-- **Stale flag:** a `running` session with no events for 15 minutes renders as `running?` (probably crashed mid-turn). Cockpit-spawned sessions already get a synthetic `SessionEnd` from the tmux `pane-exited` hook; this is the headless equivalent.
+`watch` is meant to reduce interpretation work, not add another telemetry feed:
+
+- **Granular status:** rows distinguish `running`, `thinking`, `processing`, `waiting`, `completed`, and `idle`, with compact glyphs (`🔧`, `🤔`, `⏳`, `⏸️`, `✅`, `💤`) so you can scan the table without reading every row.
+- **Native names and colors:** if you use Claude Code's `/rename` inside a session, cc-cockpit uses that name in the TASK column. If you use `/color <name>`, cc-cockpit colors the matching row in both `open` and `watch`. Supported colors: red, green, yellow, blue, magenta/purple, cyan, white, gray/grey.
+- **Native recaps:** when Claude Code writes its built-in `away_summary` recap to the session transcript (typically ~3 minutes after the session goes quiet), `watch` shows a single dim `↳ recap:` line only when that session is idle. Busy/processing/waiting sessions omit recaps so the primary state stays visually dominant. Missing recaps are omitted — no placeholder noise. cc-cockpit only reads the transcript; it never invokes another model to generate summaries.
+- **Stale flag:** a mid-turn session (`running`, `thinking`, or `processing`) with no events for 15 minutes renders with a trailing `?` (probably crashed mid-turn). Cockpit-spawned sessions already get a synthetic `SessionEnd` from the tmux `pane-exited` hook; this is the headless equivalent.
 - **Desktop notifications:** when a session enters `waiting_input`, `watch` also calls `wsl-notify-send.exe` / `notify-send` / `osascript` (whichever resolves on PATH) so you don't miss the bell on Windows Terminal under WSL2. At boot it prints which backend was chosen to stderr.
 - **Coexists with `open`:** the two modes share the same event log files. You can run `watch` in one terminal and `open` in another and they'll show the same data.
 - **Exit:** `Ctrl-C` restores the terminal cleanly. `watch` writes nothing except the bell baseline next to each workspace's `events.jsonl`.
@@ -137,11 +143,21 @@ cc-cockpit watch
 ```
 ┌─── dashboard (60 cols) ───┬─── control (bash shell) ───┐
 │ STATUS  SID  REPO  TASK   │ $                          │
-│ ▶ ...                     │                            │
+│ 💤 idle  c90e infra ci     │                            │
+│   ↳ recap: Goal: fix auth… │                            │
 └───────────────────────────┴────────────────────────────┘
 ```
 
 The dashboard is read-only and auto-updates every 0.5s. The control pane is a regular shell — that's where you run `start [<repo>] <task>` to spawn a new Claude session as a pane below the dashboard. The `<repo>` arg is optional: if your shell's cwd is inside a known repo, cc-cockpit picks that one. Each pane's top border shows `<repo>: <task>` so you can tell them apart at a glance, and the border foreground recolors with status (green=running, yellow=waiting on you, gray=idle).
+
+Inside Claude Code, use its native display commands normally:
+
+```text
+/rename last-mile migration
+/color cyan
+```
+
+cc-cockpit picks those up automatically. `/rename` replaces the TASK column for that session, and `/color` wraps the corresponding row in the requested ANSI color. These are display-only hints: they do not change the workspace, repo, branch, prompt, or event log semantics.
 
 For multi-agent work in one repo, use `start-fleet <repo> [name...]` from the control pane. It opens a single pane (border: `fleet · <repo>` — or `fleet · <repo>: <name>` if you pass a name) running [Claude Code's Agent View](https://code.claude.com/docs/en/agent-view) TUI scoped to that repo. Dispatch as many background agents as you want from inside the TUI; each one shows up as its own row on the dashboard.
 
@@ -152,10 +168,14 @@ cc-cockpit uses its own private tmux server (`-L cc-cockpit`), so it never colli
 Rows can come from three sources: single-agent panes from `cc-cockpit start`, fleet-pane agents from `cc-cockpit start-fleet`, or background sessions dispatched externally (`claude --bg`, `/bg`, `claude agents`) whose dispatch directory is inside this workspace. Agent View rows have no local pane; interact with them via `claude attach <id>` or the fleet pane.
 
 **Statuses:**
-- `▶ running` — Claude is working (assistant turn or tool execution).
-- `● waiting_input` — parked waiting on you. Terminal bell fires on entry.
-- `◯ idle` — last turn ended; no pending input.
+- `🔧 running` — Claude is executing a tool or otherwise working.
+- `🤔 thinking` — assistant turn is in progress before tool execution.
+- `⏳ processing` — Claude is processing the turn after tool activity.
+- `⏸️ waiting` — parked waiting on you. Terminal bell fires on entry.
+- `✅ completed` — the last turn finished recently.
+- `💤 idle` — the session has been quiet for a while.
 - `◼ ended` — closed via `/quit`, or auto-cleaned after a crash.
+- trailing `?` — a mid-turn session has been quiet for 15m+ and may be stale.
 
 **End a session:** `/quit` in the Claude window. If Claude crashes without firing `SessionEnd`, the per-session `tmux pane-exited` hook auto-emits a synthetic one — no manual cleanup. For the rare case where neither fires:
 
@@ -176,7 +196,7 @@ The end is not final. If the matched session was actually still live (no real pa
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create `.cc-cockpit/workspace.json`; with no repo specs, auto-discovers child git repos. |
 | `cc-cockpit doctor` | Check prerequisites, PATH, hooks, workspace config, and child repos. |
 | `cc-cockpit open` | Open the cockpit for the workspace containing your cwd. |
-| `cc-cockpit watch` | Headless dashboard: aggregate every workspace's sessions in the current terminal (no tmux, no setup). Ctrl-C to exit. |
+| `cc-cockpit watch` | Headless dashboard: aggregate every workspace's sessions in the current terminal (no tmux, no setup). Shows `/rename`, `/color`, and native Claude Code recaps when available. Ctrl-C to exit. |
 | `cc-cockpit close [<workspace>] [--yes]` | Kill the workspace's tmux session (closes the cockpit). Discovers the workspace from `$COCKPIT_WORKSPACE_NAME` if run from inside, else walks up cwd. Requires `--yes` to confirm the live sessions about to die. |
 | `cc-cockpit close --all [--yes]` | Kill the entire cc-cockpit tmux server (every workspace at once). |
 | `cc-cockpit start [<repo>] <task...>` | Open a new pane below the dashboard, running Claude in `repos[<repo>]`. Run from inside the cockpit's control pane. The `<repo>` arg can be omitted when the shell's cwd is inside a known repo — cc-cockpit picks the longest-prefix match. |
@@ -206,8 +226,8 @@ The end is not final. If the matched session was actually still live (no real pa
 1. When you `start`, `cc-cockpit` invokes `tmux split-window -v -f -t <session>:0 -e COCKPIT_SESSION_ACTIVE=1 ... claude` on the private `-L cc-cockpit` server, so the Claude session opens as a pane below the dashboard.
 2. The `SessionStart` hook in `~/.claude/settings.json` fires. cc-cockpit ingests it for two kinds of sessions: ones you started with `cc-cockpit start` (gated by the `COCKPIT_SESSION_ACTIVE=1` env var), and Claude Code Agent View background sessions (`claude --bg`, `/bg`, `claude agents`) whose dispatch directory is inside a cc-cockpit workspace. Anything else is silently dropped.
 3. Every event (`SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`) appends an envelope to `events.jsonl` under an exclusive `flock`. Sequence numbers are monotonic; wall-clock is advisory.
-4. The dashboard pane loops every 0.5s. It snapshots the log under a shared `flock`, runs the reducer in-process to produce `current.json`, renders the frame, and rings the bell on new `waiting_input` sessions.
-5. There is no daemon. No IPC. No database. If the dashboard dies, `events.jsonl` keeps growing. On restart, the reducer rebuilds the state from the log.
+4. The dashboard pane loops every 0.5s. It snapshots the log under a shared `flock`, runs the reducer in-process to produce `current.json`, reads additive Claude Code display metadata (`/rename`, `/color`) plus cached native `away_summary` recaps, renders the frame, and rings the bell on new `waiting_input` sessions.
+5. There is no daemon. No IPC. No database. If the dashboard dies, `events.jsonl` keeps growing. On restart, the reducer rebuilds the state from the log; display metadata and recaps are re-read from Claude Code's own files.
 
 Everything else is consequences of those five points.
 
@@ -232,6 +252,10 @@ Everything else is consequences of those five points.
 **Terminal header of Claude window looks weird** — tmux window names are set correctly via `tmux new-window -n "<repo>: <task>"`; what shows up inside Claude's own UI is a claude-side concern.
 
 **Dashboard isn't updating or seems frozen** — the dashboard only repaints when the frame actually changes. If nothing is happening, it's fine. Sanity check: `ls -la ~/.local/state/cc-cockpit/<workspace>/current.json` (mtime should advance every ~0.5s).
+
+**`/rename` or `/color` didn't show up** — cc-cockpit reads Claude Code's own local metadata, not a cc-cockpit command. `/rename` comes from `~/.claude/sessions/*.json`; `/color` comes from recent entries in `~/.claude/history.jsonl`. Make sure you typed the slash command inside the Claude Code session itself. Unknown color names are ignored.
+
+**No `↳ recap:` line yet** — recaps are native Claude Code `away_summary` events, not generated by cc-cockpit. They usually appear about 3 minutes after a session goes quiet, and cc-cockpit only shows them once the session is idle. Sessions that are still `running`, `thinking`, `processing`, `waiting`, or sessions where Claude Code hasn't written an `away_summary` yet, simply omit the line. cc-cockpit never shows a placeholder and never calls another model to force a summary.
 
 **Everything broken, reset hard:**
 ```bash

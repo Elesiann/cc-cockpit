@@ -232,38 +232,12 @@ func runDoctor(args []string) int {
 	if err != nil {
 		failFix("cc-cockpit install", "Claude settings not found: %s", settingsPath)
 	} else {
-		var top struct {
-			Hooks map[string][]any `json:"hooks"`
-		}
-		if err := json.Unmarshal(settingsRaw, &top); err != nil {
+		if hooksOK, err := install.HooksInstalled(settingsRaw); err != nil {
 			failFix("cc-cockpit install (rewrites the hooks block)", "Claude settings invalid: %v", err)
+		} else if hooksOK {
+			ok("Claude hooks installed and executable")
 		} else {
-			for _, ev := range install.Events {
-				found := false
-				for _, e := range top.Hooks[ev] {
-					if install.EntryHasCockpitHook(e) {
-						found = true
-						break
-					}
-				}
-				if found {
-					ok("Claude hook installed: %s", ev)
-				} else {
-					failFix("cc-cockpit install", "Claude hook missing: %s", ev)
-				}
-			}
-			matcherOK := false
-			for _, e := range top.Hooks[state.EventNotification] {
-				if install.EntryHasMatcher(e, "idle_prompt|permission_prompt") {
-					matcherOK = true
-					break
-				}
-			}
-			if matcherOK {
-				ok("Notification hook matcher is idle_prompt|permission_prompt")
-			} else {
-				failFix("cc-cockpit install", "Notification hook matcher missing idle_prompt|permission_prompt")
-			}
+			failFix("cc-cockpit install", "Claude hooks missing, stale, or pointing at a non-executable cc-cockpit")
 		}
 	}
 
