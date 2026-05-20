@@ -96,13 +96,14 @@ func Run(src Source, opts Options) error {
 		now := time.Now()
 		metas := LoadSessionMetas(home)
 		recapTexts := recaps.load(samples)
+		agentRollups := loadSubagentRollups(samples, now)
 		var frame string
 		if src.IsMulti() {
-			frame = RenderMultiWithMetasAndRecaps(samples, src.HeaderName(samples), now, metas, recapTexts)
+			frame = RenderMultiWithMetasRecapsAndAgents(samples, src.HeaderName(samples), now, metas, recapTexts, agentRollups)
 		} else if len(samples) > 0 {
-			frame = RenderWithMetasAndRecaps(samples[0].State, src.HeaderName(samples), now, metas, recapTexts)
+			frame = RenderWithMetasRecapsAndAgents(samples[0].State, src.HeaderName(samples), now, metas, recapTexts, agentRollups)
 		} else {
-			frame = RenderWithMetasAndRecaps(state.State{}, src.HeaderName(samples), now, metas, recapTexts)
+			frame = RenderWithMetasRecapsAndAgents(state.State{}, src.HeaderName(samples), now, metas, recapTexts, agentRollups)
 		}
 		if stageErr != "" {
 			frame = "⚠ DASHBOARD STAGE FAILED: " + stageErr + " — displayed state may be stale.\n" +

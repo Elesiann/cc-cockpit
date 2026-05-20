@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/elesiann/cc-cockpit/internal/state"
+	"github.com/elesiann/cc-cockpit/internal/subagent"
 )
 
 func sessAt(status, started, lastAct string, repo, task string) *state.Session {
@@ -553,6 +554,31 @@ func TestRenderWithMetas_AppliesNameAndColor(t *testing.T) {
 	}
 	if !strings.Contains(frame, "\033[31m") || !strings.Contains(frame, "\033[0m") {
 		t.Errorf("expected ANSI red wrap on data row, got:\n%s", frame)
+	}
+}
+
+func TestRenderMultiWithAgentRollups_ShowsOneSubtleLinePerParent(t *testing.T) {
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	samples := []TaggedState{{
+		Name: "gio",
+		State: state.State{Sessions: map[string]*state.Session{
+			"parent-session-1": sessAt(state.StatusWaitingInput, "2026-05-20T11:00:00Z", "2026-05-20T11:59:00Z", "api", "last-mile"),
+			"parent-session-2": sessAt(state.StatusProcessing, "2026-05-20T11:01:00Z", "2026-05-20T11:59:30Z", "web", "review"),
+		}},
+	}}
+
+	frame := RenderMultiWithMetasRecapsAndAgents(samples, "watch", now, nil, nil, map[string]subagent.Rollup{
+		"parent-session-1": {Total: 3, Active: 1, Done: 2, LatestDescription: "Design duplicate-plugin detection"},
+	})
+
+	if !strings.Contains(frame, "↳ agents: 1 active · 2 done · latest: Design duplicate-plugin detection") {
+		t.Fatalf("agent rollup missing or wrong:\n%s", frame)
+	}
+	if strings.Count(frame, "↳ agents:") != 1 {
+		t.Fatalf("expected exactly one compact agent line, got frame:\n%s", frame)
+	}
+	if strings.Contains(frame, "Explore devportal-distro") {
+		t.Fatalf("should not expand individual subagents in MVP:\n%s", frame)
 	}
 }
 
