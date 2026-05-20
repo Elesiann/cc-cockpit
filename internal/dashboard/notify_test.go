@@ -44,10 +44,10 @@ func TestEscapePowerShell(t *testing.T) {
 
 func TestBuildNotifyMessage(t *testing.T) {
 	cases := []struct {
-		count    int
-		repo     string
-		task     string
-		want     string
+		count int
+		repo  string
+		task  string
+		want  string
 	}{
 		{1, "api", "fix auth", "api · fix auth waiting for input"},
 		{1, "api", "", "api waiting for input"},

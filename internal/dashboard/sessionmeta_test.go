@@ -78,9 +78,9 @@ func TestAnsiForColor(t *testing.T) {
 		{"red", "\033[31m"},
 		{"GREEN", "\033[32m"},
 		{"  cyan  ", "\033[36m"},
-		{"purple", "\033[35m"},      // alias for magenta
-		{"grey", "\033[90m"},         // alias for gray
-		{"chartreuse", ""},           // unknown → empty (no color)
+		{"purple", "\033[35m"}, // alias for magenta
+		{"grey", "\033[90m"},   // alias for gray
+		{"chartreuse", ""},     // unknown → empty (no color)
 		{"", ""},
 	}
 	for _, c := range cases {

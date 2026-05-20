@@ -23,8 +23,8 @@ type fixture struct {
 
 func (f *fixture) resolver() *Resolver {
 	return &Resolver{
-		HomeDir:  f.homeDir,
-		Getenv:   func(k string) string { return f.env[k] },
+		HomeDir: f.homeDir,
+		Getenv:  func(k string) string { return f.env[k] },
 		ReadFile: func(p string) ([]byte, error) {
 			f.reads = append(f.reads, p)
 			if data, ok := f.files[p]; ok {
