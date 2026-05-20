@@ -54,6 +54,10 @@ func Build(event, sessionID string, payload map[string]any, env Env) map[string]
 		}
 		return envelope(event, sessionID, map[string]any{"notification_type": ntype})
 
+	case state.EventPreToolUse:
+		tool, _ := payload["tool_name"].(string)
+		return envelope(event, sessionID, map[string]any{"tool_name": tool})
+
 	case state.EventPostToolUse:
 		tool, _ := payload["tool_name"].(string)
 		return envelope(event, sessionID, map[string]any{"tool_name": tool, "success": true})

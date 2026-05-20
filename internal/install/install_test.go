@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
 func TestMergeHooks_FromEmptySettings(t *testing.T) {
@@ -97,6 +99,28 @@ func TestMergeHooks_PreservesTopLevelKeys(t *testing.T) {
 func TestMergeHooks_RejectsInvalidJSON(t *testing.T) {
 	if _, err := MergeHooks([]byte(`{not json`), "/bin/cc-cockpit"); err == nil {
 		t.Errorf("expected error on invalid JSON")
+	}
+}
+
+func TestEvents_IncludesBothToolUseHooks(t *testing.T) {
+	// Anchor: cc-cockpit's granular state machine (running / processing)
+	// depends on both PreToolUse and PostToolUse being installed in the
+	// Claude Code settings. If anyone trims Events, the dashboard silently
+	// drops to coarser states — this test prevents that regression.
+	var hasPre, hasPost bool
+	for _, ev := range Events {
+		switch ev {
+		case state.EventPreToolUse:
+			hasPre = true
+		case state.EventPostToolUse:
+			hasPost = true
+		}
+	}
+	if !hasPre {
+		t.Errorf("Events missing PreToolUse — granular `running` state requires it")
+	}
+	if !hasPost {
+		t.Errorf("Events missing PostToolUse — `processing` state requires it")
 	}
 }
 

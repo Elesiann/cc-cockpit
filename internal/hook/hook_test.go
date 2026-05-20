@@ -94,6 +94,25 @@ func TestBuild_Notification_FiltersUnknownTypes(t *testing.T) {
 	}
 }
 
+func TestBuild_PreToolUse_CapturesToolName(t *testing.T) {
+	got := Build("PreToolUse", "sid", map[string]any{"tool_name": "Bash"}, Env{})
+	if got == nil {
+		t.Fatalf("PreToolUse should not be dropped")
+	}
+	if got["event_type"] != "PreToolUse" {
+		t.Errorf("event_type: got %v, want PreToolUse", got["event_type"])
+	}
+	p := got["payload"].(map[string]any)
+	if p["tool_name"] != "Bash" {
+		t.Errorf("tool_name: got %v, want Bash", p["tool_name"])
+	}
+	// Unlike PostToolUse, PreToolUse doesn't carry a success flag — the call
+	// hasn't completed yet, so there's nothing to report on.
+	if _, hasSuccess := p["success"]; hasSuccess {
+		t.Errorf("PreToolUse payload must not include success: got %#v", p)
+	}
+}
+
 func TestBuild_PostToolUse_AlwaysSuccessTrue(t *testing.T) {
 	// Bash hook hardcodes success:true; the reducer doesn't read it but the
 	// event shape stays compatible.

@@ -20,6 +20,7 @@ var Events = []string{
 	state.EventUserPromptSubmit,
 	state.EventPermissionRequest,
 	state.EventNotification,
+	state.EventPreToolUse,
 	state.EventPostToolUse,
 	state.EventStop,
 	state.EventSessionEnd,
