@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/elesiann/cc-cockpit/internal/state"
+	"github.com/elesiann/cc-cockpit/internal/subagent"
 )
 
 // StaleAfter is how long a mid-turn session (running / thinking / processing)
@@ -50,10 +51,16 @@ func RenderWithMetas(st state.State, workspaceName string, now time.Time, metas 
 // recaps keyed by session_id. Missing recaps are omitted — no placeholder — so
 // the dashboard only spends vertical space on signal that already exists.
 func RenderWithMetasAndRecaps(st state.State, workspaceName string, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
+	return RenderWithMetasRecapsAndAgents(st, workspaceName, now, metas, recaps, nil)
+}
+
+// RenderWithMetasRecapsAndAgents is RenderWithMetasAndRecaps plus optional
+// parent session_id → subagent rollup summaries.
+func RenderWithMetasRecapsAndAgents(st state.State, workspaceName string, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
 	var b strings.Builder
 	b.WriteString(renderHeader(st, workspaceName))
 	b.WriteString("\n\n")
-	b.WriteString(renderActiveTable(st, now, metas, recaps))
+	b.WriteString(renderActiveTable(st, now, metas, recaps, agents))
 	if footer := renderEndedFooter(st, now); footer != "" {
 		b.WriteString("\n\n")
 		b.WriteString(footer)
@@ -78,10 +85,16 @@ func RenderMultiWithMetas(samples []TaggedState, title string, now time.Time, me
 // RenderMultiWithMetasAndRecaps is RenderMultiWithMetas plus optional native
 // Claude Code recaps keyed by session_id.
 func RenderMultiWithMetasAndRecaps(samples []TaggedState, title string, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
+	return RenderMultiWithMetasRecapsAndAgents(samples, title, now, metas, recaps, nil)
+}
+
+// RenderMultiWithMetasRecapsAndAgents is RenderMultiWithMetasAndRecaps plus
+// optional parent session_id → subagent rollup summaries.
+func RenderMultiWithMetasRecapsAndAgents(samples []TaggedState, title string, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
 	var b strings.Builder
 	b.WriteString(renderMultiHeader(samples, title))
 	b.WriteString("\n\n")
-	b.WriteString(renderMultiActiveTable(samples, now, metas, recaps))
+	b.WriteString(renderMultiActiveTable(samples, now, metas, recaps, agents))
 	if footer := renderMultiEndedFooter(samples, now); footer != "" {
 		b.WriteString("\n\n")
 		b.WriteString(footer)
@@ -173,7 +186,7 @@ func renderMultiHeader(samples []TaggedState, title string) string {
 	return h
 }
 
-func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
+func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
 	type row struct {
 		sid  string
 		sess *state.Session
@@ -224,10 +237,10 @@ func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMe
 	}
 	_ = tw.Flush()
 	table := colorizeDataRowsWithHeader(b.String(), sids, metas)
-	return insertRecapBlocks(table, recapSids, recaps, 2)
+	return insertSessionHints(table, sids, recaps, agents, recapSids, 2)
 }
 
-func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
+func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
 	type row struct {
 		sid  string
 		ws   string
@@ -277,7 +290,7 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 	}
 	_ = tw.Flush()
 	table := colorizeDataRowsWithHeader(b.String(), sids, metas)
-	return insertRecapBlocks(table, recapSids, recaps, 2)
+	return insertSessionHints(table, sids, recaps, agents, recapSids, 2)
 }
 
 func renderEndedFooter(st state.State, now time.Time) string {
@@ -571,28 +584,66 @@ func colorizeDataRowsWithHeader(table string, sids []string, metas map[string]Se
 }
 
 // insertRecapBlocks inserts optional recap blocks immediately below their
-// matching session rows. It works after tabwriter/colorization: data rows are
-// still at deterministic positions before insertion, so walk from bottom to
-// top to avoid shifting later indices.
+// matching session rows. Kept as a small wrapper for tests/callers that only
+// care about recaps.
 func insertRecapBlocks(table string, sids []string, recaps map[string]string, preambleLines int) string {
-	if len(recaps) == 0 {
+	return insertSessionHints(table, sids, recaps, nil, sids, preambleLines)
+}
+
+func insertSessionHints(table string, sids []string, recaps map[string]string, agents map[string]subagent.Rollup, recapSids []string, preambleLines int) string {
+	if len(recaps) == 0 && len(agents) == 0 {
 		return table
+	}
+	recapAllowed := make(map[string]bool, len(recapSids))
+	for _, sid := range recapSids {
+		if sid != "" {
+			recapAllowed[sid] = true
+		}
 	}
 	lines := strings.Split(strings.TrimRight(table, "\n"), "\n")
 	for i := len(sids) - 1; i >= 0; i-- {
-		text := strings.TrimSpace(recaps[sids[i]])
-		if text == "" {
+		sid := sids[i]
+		var insert []string
+		if rollup, ok := agents[sid]; ok && rollup.Total > 0 {
+			insert = append(insert, wrapAgentRollup(rollup, 78)...)
+		}
+		if recapAllowed[sid] {
+			text := strings.TrimSpace(recaps[sid])
+			if text != "" {
+				insert = append(insert, wrapRecap(text, 78)...)
+			}
+		}
+		if len(insert) == 0 {
 			continue
 		}
 		idx := preambleLines + i
 		if idx < 0 || idx >= len(lines) {
 			continue
 		}
-		block := wrapRecap(text, 78)
-		insert := append([]string{}, block...)
 		lines = append(lines[:idx+1], append(insert, lines[idx+1:]...)...)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func wrapAgentRollup(r subagent.Rollup, width int) []string {
+	const prefix = "    ↳ agents: "
+	const ansiGray = "\033[90m"
+	parts := []string{}
+	if r.Active > 0 {
+		parts = append(parts, fmt.Sprintf("%d active", r.Active))
+	}
+	if r.Done > 0 {
+		parts = append(parts, fmt.Sprintf("%d done", r.Done))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%d total", r.Total))
+	}
+	line := prefix + strings.Join(parts, " · ")
+	if desc := strings.TrimSpace(r.LatestDescription); desc != "" {
+		line += " · latest: " + desc
+	}
+	line = truncRunesWithEllipsis(line, width)
+	return []string{ansiGray + line + ansiReset}
 }
 
 // wrapRecap renders a recap as one subtle, low-hierarchy line. Recaps are
