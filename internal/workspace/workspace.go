@@ -178,7 +178,7 @@ func resolveRepo(root, path string) (relPath, absPath string, err error) {
 		absPath = real
 	}
 	relPath, err = filepath.Rel(rootReal, absPath)
-	if err != nil || relPath == "." || strings.HasPrefix(relPath, "..") {
+	if err != nil || relPath == "." || relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
 		return "", "", fmt.Errorf("resolves outside workspace root: %s", path)
 	}
 	info, err := os.Stat(absPath)

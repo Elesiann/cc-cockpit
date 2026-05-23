@@ -105,6 +105,19 @@ func TestAddRepo_Containment(t *testing.T) {
 		t.Errorf("AddRepo good: %v", err)
 	}
 
+	// Inside-root directories whose names start with ".." are valid as long
+	// as filepath.Rel did not actually escape to ".." or "../...".
+	dotdotName := filepath.Join(tmp, "..repo")
+	if err := os.MkdirAll(dotdotName, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("git", "-C", dotdotName, "init", "-q").Run(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	if err := ws.AddRepo(tmp, "dotdot", "..repo"); err != nil {
+		t.Errorf("AddRepo ..repo inside root: %v", err)
+	}
+
 	// Outside root: rejected.
 	outside := filepath.Join(filepath.Dir(tmp), "outside")
 	_ = os.MkdirAll(outside, 0o755)
