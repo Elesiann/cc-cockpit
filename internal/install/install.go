@@ -267,8 +267,13 @@ func InstallBin(binDir, selfPath string) error {
 	if existing, err := os.Readlink(target); err == nil && existing == selfPath {
 		return nil
 	}
-	_ = os.Remove(target)
-	if err := os.Symlink(selfPath, target); err != nil {
+	tmp := filepath.Join(binDir, fmt.Sprintf(".cc-cockpit.%d.tmp", os.Getpid()))
+	_ = os.Remove(tmp)
+	if err := os.Symlink(selfPath, tmp); err != nil {
+		return fmt.Errorf("symlink %q -> %q: %w", target, selfPath, err)
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("symlink %q -> %q: %w", target, selfPath, err)
 	}
 	return nil

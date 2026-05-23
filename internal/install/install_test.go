@@ -195,6 +195,27 @@ func TestEnsureHooks_RewritesDeadCockpitHookToPathBinary(t *testing.T) {
 	}
 }
 
+func TestInstallBin_PreservesExistingTargetWhenReplacementFails(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "cc-cockpit")
+	original := []byte("#!/bin/sh\nexit 42\n")
+	if err := os.WriteFile(target, original, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := InstallBin(dir, "bad\x00target"); err == nil {
+		t.Fatalf("InstallBin should fail for invalid symlink target")
+	}
+
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("existing target was changed on failure: got %q want %q", got, original)
+	}
+}
+
 func TestHooksInstalled_MissingOneEventReturnsFalse(t *testing.T) {
 	merged, _ := MergeHooks(nil, "/bin/cc-cockpit")
 	// Strip SessionEnd hooks back out.
