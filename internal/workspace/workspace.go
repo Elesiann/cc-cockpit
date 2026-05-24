@@ -8,12 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 )
-
-var slugRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 // Workspace is the on-disk shape of .cc-cockpit/workspace.json.
 type Workspace struct {
@@ -21,8 +18,28 @@ type Workspace struct {
 	Repos map[string]string `json:"repos"`
 }
 
+// ValidSlug matches the regex ^[a-zA-Z0-9][a-zA-Z0-9._-]*$. Implemented as
+// a hand-rolled byte loop instead of regexp.MustCompile so the binary
+// doesn't pull in regexp + regexp/syntax + unicode tables (~90 KB stripped)
+// for one trivial pattern.
 func ValidSlug(s string) bool {
-	return slugRe.MatchString(s)
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		alnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if i == 0 {
+			if !alnum {
+				return false
+			}
+			continue
+		}
+		if !alnum && c != '.' && c != '_' && c != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // SlugFromPath builds a slug from a path's basename: non-[a-zA-Z0-9._-]
