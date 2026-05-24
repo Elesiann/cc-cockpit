@@ -241,6 +241,28 @@ else
   fail "end state-only behavior failed: rc=$rc status=$ended_status out='$out'"
 fi
 
+# `all-non-ended` is a wildcard; it must always require --yes even when the
+# live set happens to be size 1. Without the guard, a one-session env would
+# nuke that session without confirmation.
+STATE_ALL="$XDG_STATE_HOME/cc-cockpit/allws"
+mkdir -p "$STATE_ALL"
+cat > "$STATE_ALL/events.jsonl" <<EOF
+{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"solo","payload":{"cwd":"/r"}}
+EOF
+out="$("$BIN" end all-non-ended 2>&1)"
+rc=$?
+solo_status="$("${REDUCER[@]}" < "$STATE_ALL/events.jsonl" | jq -r '.sessions.solo.status')"
+if [ "$rc" -eq 2 ] && [ "$solo_status" != "ended" ] && echo "$out" | grep -q 're-run with --yes'; then
+  pass 'all-non-ended without --yes refuses even when count is 1'
+else
+  fail "all-non-ended guard failed: rc=$rc status=$solo_status out='$out'"
+fi
+out="$("$BIN" end all-non-ended --yes 2>&1)"
+solo_status="$("${REDUCER[@]}" < "$STATE_ALL/events.jsonl" | jq -r '.sessions.solo.status')"
+[ "$solo_status" = "ended" ] \
+  && pass 'all-non-ended --yes proceeds' \
+  || fail "all-non-ended --yes did not end solo session: status=$solo_status out='$out'"
+
 # =============================================================
 echo '[7] synthetic SessionEnd revivable; natural stays terminal'
 # =============================================================

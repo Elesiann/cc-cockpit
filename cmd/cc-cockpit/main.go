@@ -342,7 +342,12 @@ func runEnd(args []string) int {
 		return 0
 	}
 
-	if len(targets) > 1 && !yes {
+	// `all-non-ended` is always treated as a broad nuke and must require --yes,
+	// even when it happens to match a single session. The user's intent at the
+	// keyword is "end everything"; silently running without confirmation when
+	// the live set happens to be size 1 turns the wildcard into a footgun.
+	needsConfirm := len(targets) > 1 || prefix == "all-non-ended"
+	if needsConfirm && !yes {
 		fmt.Fprintf(os.Stderr, "end: would end %d session(s):\n", len(targets))
 		for _, t := range targets {
 			fmt.Fprintf(os.Stderr, "  - [%s] %s\n", filepath.Base(t.stateHome), t.sid)
