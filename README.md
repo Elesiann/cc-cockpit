@@ -81,8 +81,11 @@ There are two ways to get the binary onto your `PATH`. After either one, run `cc
 # Option A: build from source
 go install github.com/elesiann/cc-cockpit/cmd/cc-cockpit@latest
 
-# Option B: download a release binary (linux/amd64; see Releases for other platforms)
-curl -L https://github.com/elesiann/cc-cockpit/releases/latest/download/cc-cockpit_linux_amd64.tar.gz \
+# Option B: download a release binary (Linux + macOS, amd64 + arm64).
+# Replace VERSION with the release tag (e.g. 1.0.0) and OS_ARCH with one of
+# linux_amd64, linux_arm64, darwin_amd64, darwin_arm64.
+VERSION=1.0.0 OS_ARCH=linux_amd64 \
+  curl -L "https://github.com/elesiann/cc-cockpit/releases/download/v${VERSION}/cc-cockpit_${VERSION}_${OS_ARCH}.tar.gz" \
   | tar -xz -C ~/.local/bin/ cc-cockpit
 
 # Then install hooks

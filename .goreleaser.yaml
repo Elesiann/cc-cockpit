@@ -14,6 +14,7 @@ builds:
       - CGO_ENABLED=0
     goos:
       - linux
+      - darwin
     goarch:
       - amd64
       - arm64
@@ -51,5 +52,5 @@ release:
   draft: false
   prerelease: auto
   header: |
-    `cc-cockpit {{ .Tag }}` — single static Linux binary; no daemon, no DB.
+    `cc-cockpit {{ .Tag }}` — single static binary (Linux + macOS, amd64 + arm64); no daemon, no DB.
     See [README](https://github.com/elesiann/cc-cockpit#readme) for usage.
