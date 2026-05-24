@@ -21,7 +21,7 @@ jobs:
           cache: true
 
       - name: Install runtime deps for smoke test
-        run: sudo apt-get update && sudo apt-get install -y tmux jq
+        run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Check gofmt
         run: |

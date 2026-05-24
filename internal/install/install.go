@@ -74,10 +74,6 @@ func MergeHooks(existing []byte, binPath string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// EntryHasCockpitHook reports whether a settings hook-entry contains a
-// cc-cockpit hook command. Exposed so doctor can reuse it.
-func EntryHasCockpitHook(e any) bool { return entryHasCockpitHook(e) }
-
 func entryHasCockpitHook(e any) bool {
 	cmds := cockpitHookCommands(e)
 	return len(cmds) > 0
@@ -286,56 +282,6 @@ func splitHookCommandFields(s string) ([]string, bool) {
 		fields = append(fields, b.String())
 	}
 	return fields, true
-}
-
-// EnsureHooks installs cc-cockpit's Claude Code hooks if HooksInstalled
-// is false. Silent no-op when already correct. Resolves settingsPath from
-// CLAUDE_SETTINGS_PATH / ~/.claude/settings.json when empty.
-//
-// Designed for `cc-cockpit open` to self-bootstrap; does NOT touch the
-// binary symlink (whoever is calling is already on PATH).
-func EnsureHooks(settingsPath string) error {
-	if settingsPath == "" {
-		if p := os.Getenv("CLAUDE_SETTINGS_PATH"); p != "" {
-			settingsPath = p
-		} else {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return fmt.Errorf("home dir: %w", err)
-			}
-			settingsPath = filepath.Join(home, ".claude", "settings.json")
-		}
-	}
-	data, _ := os.ReadFile(settingsPath) // missing file is fine; InstallHooks creates it
-	ok, err := HooksInstalled(data)
-	if err != nil {
-		return fmt.Errorf("settings.json invalid: %w", err)
-	}
-	if ok {
-		return nil
-	}
-	selfPath, err := hookBinaryPath()
-	if err != nil {
-		return fmt.Errorf("locate binary: %w", err)
-	}
-	return InstallHooks(settingsPath, selfPath)
-}
-
-func hookBinaryPath() (string, error) {
-	if p, err := exec.LookPath("cc-cockpit"); err == nil && p != "" {
-		if abs, err := filepath.Abs(p); err == nil {
-			return abs, nil
-		}
-		return p, nil
-	}
-	selfPath, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	if real, err := filepath.EvalSymlinks(selfPath); err == nil {
-		selfPath = real
-	}
-	return selfPath, nil
 }
 
 // InstallBin symlinks binDir/cc-cockpit -> selfPath. No-op if the symlink

@@ -3,19 +3,6 @@
 #
 # Run from anywhere:   bash test/smoke.sh
 # Exits 0 on full pass, non-zero on any failure (prints FAIL: <what>).
-#
-# Covers the design invariants from the bash MVP, now run against the Go binary:
-#  (1) hook is silent when COCKPIT_SESSION_ACTIVE is unset
-#  (2) workspace slug validation rejects traversal / slashes
-#  (3) canonical-root binding rejects name collisions
-#  (4) spawn containment rejects ../escape and non-git dirs
-#  (5) reducer tolerates malformed events, reports dropped_events
-#  (6) bell event-delta logic counts Notification events
-#  (7) synthetic SessionEnd is revivable; natural SessionEnd is terminal
-#  (8) reducer is deterministic (byte-identical on repeat runs)
-#
-# Does NOT cover: actual tmux launch end-to-end. Validated by manual smoke
-# testing during development.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,7 +21,6 @@ FAIL=0
 pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS+1)); }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 
-# ----- sandbox -----
 SANDBOX="$(mktemp -d)"
 export XDG_STATE_HOME="$SANDBOX/state"
 trap 'rm -rf "$SANDBOX" "$BUILD_DIR"' EXIT
@@ -80,97 +66,62 @@ session_start_count="$(jq '[.hooks.SessionStart[] | .hooks[]? | select(.command 
   || fail "install duplicated hooks: count=$session_start_count out='$out'"
 
 # =============================================================
-echo '[1] hook silent without COCKPIT_SESSION_ACTIVE'
+echo '[1] removed tmux commands are not public CLI'
 # =============================================================
-unset COCKPIT_SESSION_ACTIVE COCKPIT_STATE_HOME
-out="$(echo '{"session_id":"x","cwd":"/tmp"}' | "$BIN" hook SessionStart 2>&1)"
-rc=$?
-# Since 0.6.1 the hook always routes: without workspace context it falls back
-# to the _global workspace. So the state dir MAY be created — that's correct.
-# The invariant is: exit 0 and no output (hook is always silent on stdout/stderr).
-if [ "$rc" -eq 0 ] && [ -z "$out" ]; then
-  pass 'hook without COCKPIT_SESSION_ACTIVE: exit 0, no output (routes to global workspace)'
-else
-  fail "hook guard breached: rc=$rc out='$out'"
-fi
-
-# =============================================================
-echo '[2] workspace name slug validation'
-# =============================================================
-mkdir -p "$SANDBOX/ws-badjson/.cc-cockpit"
-printf '{not json\n' > "$SANDBOX/ws-badjson/.cc-cockpit/workspace.json"
-out="$(cd "$SANDBOX/ws-badjson" && "$BIN" open 2>&1 < /dev/null)"
-if echo "$out" | grep -q 'workspace.json must be a valid JSON object'; then
-  pass 'invalid workspace.json rejected with clear error'
-else
-  fail "invalid workspace.json error unclear: '$out'"
-fi
-
-cd "$SANDBOX" && mkdir -p ws-badslug/.cc-cockpit
-for bad in '../evil' 'foo/bar' '.hidden' '' 'a b'; do
-  echo "{\"name\":\"$bad\",\"repos\":{}}" > "$SANDBOX/ws-badslug/.cc-cockpit/workspace.json"
-  out="$(cd "$SANDBOX/ws-badslug" && "$BIN" open 2>&1 < /dev/null)"
-  if echo "$out" | grep -q 'invalid workspace name'; then
-    pass "slug '$bad' rejected"
+for cmd in open close start start-fleet dashboard; do
+  out="$("$BIN" "$cmd" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'unknown subcommand'; then
+    pass "$cmd is removed"
   else
-    fail "slug '$bad' NOT rejected: '$out'"
+    fail "$cmd still appears callable: rc=$rc out='$out'"
   fi
 done
-
-# Fake tmux — used by [2.5] and [3]'s open assertions. Records argv to
-# $SANDBOX/open-tmux.args; reports "no session" so open proceeds to create.
-mkdir -p "$SANDBOX/open-fake-bin"
-cat > "$SANDBOX/open-fake-bin/tmux" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" >> "$SANDBOX/open-tmux.args"
-# tmux is invoked as: tmux -L cc-cockpit <subcmd> ...; subcmd is \$3.
-case "\$3" in
-  has-session) exit 1 ;;
-esac
-exit 0
-EOF
-chmod +x "$SANDBOX/open-fake-bin/tmux"
-
-# =============================================================
-echo '[2.5] open auto-bootstraps (workspace.json + Claude hooks)'
-# =============================================================
-mkdir -p "$SANDBOX/ws-autoinit/api" "$SANDBOX/ws-autoinit/web"
-(cd "$SANDBOX/ws-autoinit/api" && git init -q)
-(cd "$SANDBOX/ws-autoinit/web" && git init -q)
-FRESH_SETTINGS="$SANDBOX/fresh-claude/settings.json"
-out="$(cd "$SANDBOX/ws-autoinit" \
-  && PATH="$SANDBOX/open-fake-bin:$PATH" \
-     CLAUDE_SETTINGS_PATH="$FRESH_SETTINGS" \
-     "$BIN" open 2>&1)"
-rc=$?
-ws_name="$(jq -r '.name' "$SANDBOX/ws-autoinit/.cc-cockpit/workspace.json" 2>/dev/null)"
-api_path="$(jq -r '.repos.api // empty' "$SANDBOX/ws-autoinit/.cc-cockpit/workspace.json" 2>/dev/null)"
-web_path="$(jq -r '.repos.web // empty' "$SANDBOX/ws-autoinit/.cc-cockpit/workspace.json" 2>/dev/null)"
-hooks_count="$(jq '[.hooks.SessionStart[] | .hooks[]? | select(.command | contains("cc-cockpit hook SessionStart"))] | length' "$FRESH_SETTINGS" 2>/dev/null)"
-if [ "$rc" -eq 0 ] && [ "$ws_name" = "ws-autoinit" ] \
-   && [ "$api_path" = "api" ] && [ "$web_path" = "web" ] \
-   && [ "$hooks_count" = "1" ]; then
-  pass 'open auto-inits workspace.json AND installs Claude hooks from scratch'
+help="$("$BIN" --help 2>&1)"
+if ! echo "$help" | grep -Eq '^  (open|close|start|start-fleet|dashboard)([[:space:]]|$)'; then
+  pass 'help omits removed tmux commands'
 else
-  fail "open auto-bootstrap failed: rc=$rc ws_name=$ws_name api=$api_path web=$web_path hooks=$hooks_count out='$out'"
+  fail "help still mentions removed commands: $help"
 fi
 
+# =============================================================
+echo '[2] hook routes global and workspace sessions silently'
+# =============================================================
+unset COCKPIT_STATE_HOME
+out="$(echo '{"session_id":"global1","cwd":"/tmp"}' | "$BIN" hook SessionStart 2>&1)"
+rc=$?
+global_events="$XDG_STATE_HOME/cc-cockpit/_global/events.jsonl"
+if [ "$rc" -eq 0 ] && [ -z "$out" ] && [ -s "$global_events" ]; then
+  pass 'hook without workspace: silent and routed to _global'
+else
+  fail "global hook route failed: rc=$rc out='$out' events=$global_events"
+fi
+
+mkdir -p "$SANDBOX/ws-watch/repo"
+(cd "$SANDBOX/ws-watch/repo" && git init -q)
+make_ws "$SANDBOX/ws-watch" watchws repo=repo
+out="$(cd "$SANDBOX/ws-watch/repo" && echo "{\"session_id\":\"ws1\",\"cwd\":\"$SANDBOX/ws-watch/repo\"}" | "$BIN" hook SessionStart 2>&1)"
+rc=$?
+ws_events="$XDG_STATE_HOME/cc-cockpit/watchws/events.jsonl"
+if [ "$rc" -eq 0 ] && [ -z "$out" ] && [ -s "$ws_events" ]; then
+  pass 'hook inside workspace routes to workspace state'
+else
+  fail "workspace hook route failed: rc=$rc out='$out' events=$ws_events"
+fi
+
+# =============================================================
+echo '[3] init manages optional workspace labels'
+# =============================================================
 mkdir -p "$SANDBOX/ws-empty"
-out="$(cd "$SANDBOX/ws-empty" \
-  && PATH="$SANDBOX/open-fake-bin:$PATH" \
-     CLAUDE_SETTINGS_PATH="$SETTINGS" \
-     "$BIN" open 2>&1)"
+out="$(cd "$SANDBOX/ws-empty" && "$BIN" init --name emptyws 2>&1)"
 rc=$?
 empty_repos="$(jq -c '.repos' "$SANDBOX/ws-empty/.cc-cockpit/workspace.json" 2>/dev/null)"
-if [ "$rc" -eq 0 ] && [ "$empty_repos" = "{}" ]; then
-  pass 'open auto-inits with empty repos when no child repos found'
+if [ "$rc" -eq 0 ] && [ "$empty_repos" = "{}" ] && echo "$out" | grep -q 'cc-cockpit watch'; then
+  pass 'init allows a workspace with no repo labels'
 else
-  fail "open auto-init (empty) failed: rc=$rc repos=$empty_repos out='$out'"
+  fail "init empty workspace failed: rc=$rc repos=$empty_repos out='$out'"
 fi
 
-# =============================================================
-echo '[3] init bootstraps workspace.json'
-# =============================================================
 mkdir -p "$SANDBOX/ws-init/packages/api" "$SANDBOX/ws-init/web"
 (cd "$SANDBOX/ws-init/packages/api" && git init -q)
 (cd "$SANDBOX/ws-init/web" && git init -q)
@@ -182,8 +133,7 @@ if [ "$rc" -eq 0 ] \
    && [ "$api_path" = "packages/api" ] \
    && [ "$web_path" = "web" ] \
    && echo "$out" | grep -q '^workspace: initws$' \
-   && echo "$out" | grep -q '^repos:$' \
-   && echo "$out" | grep -q 'cc-cockpit start api <task>'; then
+   && echo "$out" | grep -q 'cc-cockpit watch'; then
   pass 'init auto-discovers child git repos'
 else
   fail "init discovery failed: rc=$rc out='$out' api=$api_path web=$web_path"
@@ -206,32 +156,24 @@ explicit_path="$(jq -r '.repos.api // empty' "$SANDBOX/ws-explicit/.cc-cockpit/w
   && pass 'init accepts explicit repo=path specs' \
   || fail "init explicit failed: rc=$rc out='$out' path=$explicit_path"
 
-> "$SANDBOX/open-tmux.args"  # reset capture between [2.5] and [3]
-out="$(cd "$SANDBOX/ws-init" && PATH="$SANDBOX/open-fake-bin:$PATH" CLAUDE_SETTINGS_PATH="$SETTINGS" "$BIN" open 2>&1)"
-rc=$?
-if [ "$rc" -eq 0 ] \
-   && grep -qx -- 'new-session' "$SANDBOX/open-tmux.args" \
-   && grep -qx -- 'attach-session' "$SANDBOX/open-tmux.args"; then
-  pass 'open launches tmux for an initialized workspace'
-else
-  fail "open failed: rc=$rc out='$out' args='$(cat "$SANDBOX/open-tmux.args" 2>/dev/null)'"
-fi
+for bad in '../evil' 'foo/bar' '.hidden' 'a b'; do
+  out="$(cd "$SANDBOX" && "$BIN" init --force --name "$bad" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'invalid workspace name'; then
+    pass "slug '$bad' rejected"
+  else
+    fail "slug '$bad' NOT rejected: rc=$rc out='$out'"
+  fi
+done
 
 # =============================================================
-echo '[4] doctor validates install and workspace health'
+echo '[4] doctor validates install and optional workspace health'
 # =============================================================
-cat > "$SANDBOX/bin/tmux" <<'EOF'
-#!/bin/bash
-case "$1" in
-  -V) echo "tmux 3.4"; exit 0 ;;
-esac
-exit 0
-EOF
 cat > "$SANDBOX/bin/claude" <<'EOF'
 #!/bin/bash
 exit 0
 EOF
-chmod +x "$SANDBOX/bin/tmux" "$SANDBOX/bin/claude"
+chmod +x "$SANDBOX/bin/claude"
 out="$(cd "$SANDBOX/ws-init" \
   && CLAUDE_SETTINGS_PATH="$SETTINGS" PATH="$SANDBOX/bin:$PATH" "$BIN" doctor 2>&1)"
 rc=$?
@@ -244,133 +186,22 @@ else
   fail "doctor failed unexpectedly: rc=$rc out='$out'"
 fi
 
-# =============================================================
-echo '[5] canonical-root binding blocks name collision'
-# =============================================================
-mkdir -p "$SANDBOX/ws-a/child" "$SANDBOX/ws-b/child"
-(cd "$SANDBOX/ws-a/child" && git init -q)
-(cd "$SANDBOX/ws-b/child" && git init -q)
-make_ws "$SANDBOX/ws-a" collide child=child
-make_ws "$SANDBOX/ws-b" collide child=child
-
-# Pre-seed state as if ws-a had opened (real open execs tmux and would block).
-STATE_COLLIDE="$XDG_STATE_HOME/cc-cockpit/collide"
-mkdir -p "$STATE_COLLIDE"
-echo "$(realpath "$SANDBOX/ws-a")" > "$STATE_COLLIDE/workspace_root"
-out="$(cd "$SANDBOX/ws-b" && PATH="$SANDBOX/open-fake-bin:$PATH" "$BIN" open 2>&1 < /dev/null)"
-if echo "$out" | grep -q 'already bound to'; then
-  pass 'collision rejected with clear error'
-else
-  fail "collision NOT rejected: '$out'"
-fi
-
-# =============================================================
-echo '[6] spawn containment + git-repo check'
-# =============================================================
-mkdir -p "$SANDBOX/ws-spawn/good" "$SANDBOX/ws-spawn/notgit" "$SANDBOX/outside-ws"
-(cd "$SANDBOX/ws-spawn/good" && git init -q)
-make_ws "$SANDBOX/ws-spawn" spawntest good=good notgit=notgit escape=../outside-ws
-
-export COCKPIT_STATE_HOME="$SANDBOX/spawn-state"
-export CC_COCKPIT_WORKSPACE_ROOT="$SANDBOX/ws-spawn"
-export COCKPIT_WORKSPACE_NAME=spawntest
-
-out="$("$BIN" start --repo escape --task t 2>&1)"
-echo "$out" | grep -q 'outside workspace root' && pass 'escape (../outside-ws) rejected' || fail "escape accepted: '$out'"
-
-out="$("$BIN" start --repo notgit --task t 2>&1)"
-echo "$out" | grep -q 'not a git repo' && pass 'non-git dir rejected' || fail "non-git accepted: '$out'"
-
-FAKE_BIN="$SANDBOX/fake-bin"
-mkdir -p "$FAKE_BIN"
-# Fake tmux: log every argv to tmux-spawn.args (append, since NewClaudePane
-# calls list-panes → split-window → select-pane in sequence). list-panes
-# returns 2 ids (dashboard + control) so the spawn takes the first-pane
-# branch. split-window prints the new pane id.
-cat > "$FAKE_BIN/tmux" <<EOF
-#!/bin/bash
-printf '%s\n' "\$@" >> "$SANDBOX/tmux-spawn.args"
-case "\$3" in
-  list-panes) printf '%%0\n%%1\n' ;;
-  split-window) echo "%42" ;;
-esac
-exit 0
-EOF
-cat > "$FAKE_BIN/claude" <<'EOF'
-#!/bin/bash
-exit 0
-EOF
-chmod +x "$FAKE_BIN/tmux" "$FAKE_BIN/claude"
-OLD_PATH="$PATH"
-export PATH="$FAKE_BIN:$PATH"
-: > "$SANDBOX/tmux-spawn.args"
-out="$("$BIN" start --repo good --task "layout test" 2>&1)"
+out="$(cd "$SANDBOX" \
+  && CLAUDE_SETTINGS_PATH="$SETTINGS" PATH="$SANDBOX/bin:$PATH" "$BIN" doctor 2>&1)"
 rc=$?
-export PATH="$OLD_PATH"
 if [ "$rc" -eq 0 ] \
-   && grep -qx -- 'split-window' "$SANDBOX/tmux-spawn.args" \
-   && grep -qx -- '-v' "$SANDBOX/tmux-spawn.args" \
-   && grep -qx -- '-f' "$SANDBOX/tmux-spawn.args" \
-   && grep -qx -- '-c' "$SANDBOX/tmux-spawn.args"; then
-  pass 'start launches tmux split-window -v -f (full-width bottom pane)'
+   && echo "$out" | grep -q "workspace: not initialized" \
+   && echo "$out" | grep -q "doctor: all checks passed"; then
+  pass 'doctor treats missing workspace as optional'
 else
-  fail "start failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
-fi
-
-OLD_PATH="$PATH"
-export PATH="$FAKE_BIN:$PATH"
-out="$("$BIN" start good shorthand task 2>&1)"
-rc=$?
-export PATH="$OLD_PATH"
-if [ "$rc" -eq 0 ] \
-   && grep -qx -- 'good: shorthand task' "$SANDBOX/tmux-spawn.args" \
-   && grep -qx -- 'COCKPIT_TASK_NAME=shorthand task' "$SANDBOX/tmux-spawn.args"; then
-  pass 'start accepts repo plus unquoted task words'
-else
-  fail "start shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
-fi
-
-OLD_PATH="$PATH"
-export PATH="$FAKE_BIN:$PATH"
-out="$("$BIN" start good positional task 2>&1)"
-rc=$?
-export PATH="$OLD_PATH"
-if [ "$rc" -eq 0 ] \
-   && grep -qx -- 'good: positional task' "$SANDBOX/tmux-spawn.args" \
-   && grep -qx -- 'COCKPIT_TASK_NAME=positional task' "$SANDBOX/tmux-spawn.args"; then
-  pass 'start accepts shorthand repo plus task words'
-else
-  fail "start shorthand failed: rc=$rc out='$out' args='$(cat "$SANDBOX/tmux-spawn.args" 2>/dev/null)'"
-fi
-
-unset COCKPIT_STATE_HOME CC_COCKPIT_WORKSPACE_ROOT COCKPIT_WORKSPACE_NAME
-
-# =============================================================
-echo '[7] start rejects flags without values cleanly'
-# =============================================================
-for flag in --repo --task --related; do
-  out="$("$BIN" start "$flag" 2>&1)"
-  rc=$?
-  if [ "$rc" -eq 2 ] && [[ "$out" == *"$flag requires a value"* ]]; then
-    pass "start $flag without value rejected cleanly"
-  else
-    fail "start $flag bad error: rc=$rc out='$out'"
-  fi
-done
-
-out="$("$BIN" start --repo --task t 2>&1)"
-rc=$?
-if [ "$rc" -eq 2 ] && echo "$out" | grep -q '\-\-repo requires a value'; then
-  pass 'start --repo followed by another flag rejected as missing value'
-else
-  fail "start --repo accepted another flag as value: rc=$rc out='$out'"
+  fail "doctor should pass without workspace: rc=$rc out='$out'"
 fi
 
 # =============================================================
-echo '[8] reducer tolerates malformed events'
+echo '[5] reducer tolerates malformed events'
 # =============================================================
 cat > "$SANDBOX/events-bad.jsonl" <<EOF
-{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"r","declared_related_repos":[],"task_name":"t","cwd":"/x"}}
+{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"cwd":"/x"}}
 THIS LINE IS NOT JSON
 {"seq":99,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","payload":{}}
 {"seq":100,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"bad","payload":[]}
@@ -379,32 +210,43 @@ THIS LINE IS NOT JSON
 EOF
 dropped="$("${REDUCER[@]}" < "$SANDBOX/events-bad.jsonl" | jq -r '.dropped_events')"
 status="$("${REDUCER[@]}" < "$SANDBOX/events-bad.jsonl" | jq -r '.sessions.s1.status')"
-# Stop event sets `completed` (the granular state machine from 0.7). The
-# render layer derives `idle` visually after IdleAfterCompleted elapses;
-# the reducer itself stays event-pure.
 [ "$dropped" = "4" ] && [ "$status" = "completed" ] \
   && pass "reducer: dropped=$dropped, status=$status" \
   || fail "reducer: dropped=$dropped, status=$status (expected 4, completed)"
 
 # =============================================================
-echo '[9] end tolerates empty current sessions'
+echo '[6] end/reap are state-only synthetic SessionEnd tools'
 # =============================================================
-mkdir -p "$SANDBOX/mark-empty"
-touch "$SANDBOX/mark-empty/events.jsonl"
-out="$(COCKPIT_STATE_HOME="$SANDBOX/mark-empty" "$BIN" end all-non-ended --yes 2>&1)"
+# A prefix that matches no live session — exercises the "no targets" exit
+# path without disturbing the sessions from earlier checks.
+out="$("$BIN" end zzz-no-such-session --yes 2>&1)"
 rc=$?
 if [ "$rc" -eq 0 ] && echo "$out" | grep -q "no matching non-ended sessions"; then
-  pass 'end handles empty sessions cleanly'
+  pass 'end with unmatched prefix exits cleanly'
 else
-  fail "end empty sessions failed: rc=$rc out='$out'"
+  fail "end unmatched prefix failed: rc=$rc out='$out'"
+fi
+
+STATE_END="$XDG_STATE_HOME/cc-cockpit/endws"
+mkdir -p "$STATE_END"
+cat > "$STATE_END/events.jsonl" <<EOF
+{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"endme","payload":{"cwd":"/r"}}
+EOF
+out="$("$BIN" end endme --yes 2>&1)"
+rc=$?
+ended_status="$("${REDUCER[@]}" < "$STATE_END/events.jsonl" | jq -r '.sessions.endme.status')"
+if [ "$rc" -eq 0 ] && [ "$ended_status" = "ended" ] && ! echo "$out" | grep -q 'closed pane'; then
+  pass 'end appends state-only synthetic SessionEnd'
+else
+  fail "end state-only behavior failed: rc=$rc status=$ended_status out='$out'"
 fi
 
 # =============================================================
-echo '[10] synthetic SessionEnd revivable; natural stays terminal'
+echo '[7] synthetic SessionEnd revivable; natural stays terminal'
 # =============================================================
 cat > "$SANDBOX/events-dismiss.jsonl" <<EOF
-{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"a","payload":{"primary_repo":"r","task_name":"ta","declared_related_repos":[]}}
-{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"SessionStart","session_id":"b","payload":{"primary_repo":"r","task_name":"tb","declared_related_repos":[]}}
+{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"a","payload":{"cwd":"/r"}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"SessionStart","session_id":"b","payload":{"cwd":"/r"}}
 {"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"SessionEnd","session_id":"a","payload":{"synthetic":true}}
 {"seq":4,"wall_clock_iso8601":"2026-04-20T15:00:03Z","event_type":"SessionEnd","session_id":"b","payload":{}}
 {"seq":5,"wall_clock_iso8601":"2026-04-20T15:00:04Z","event_type":"UserPromptSubmit","session_id":"a","payload":{"prompt_preview":"alive"}}
@@ -412,16 +254,12 @@ cat > "$SANDBOX/events-dismiss.jsonl" <<EOF
 EOF
 a_status="$("${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.a.status')"
 b_status="$("${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" | jq -r '.sessions.b.status')"
-# Since 0.7 the granular state machine makes UserPromptSubmit set `thinking`
-# (not the generic `running`). Revival sets `running` first, then the event
-# handler refines it — so the final status for a revived+UserPromptSubmit
-# session is `thinking`.
 [ "$a_status" = "thinking" ] && [ "$b_status" = "ended" ] \
   && pass "synthetic-end revived (a=$a_status); natural-end terminal (b=$b_status)" \
   || fail "dismissal logic broken: a=$a_status (want thinking), b=$b_status (want ended)"
 
 # =============================================================
-echo '[11] reducer determinism'
+echo '[8] reducer determinism'
 # =============================================================
 "${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r1"
 "${REDUCER[@]}" < "$SANDBOX/events-dismiss.jsonl" > "$SANDBOX/r2"

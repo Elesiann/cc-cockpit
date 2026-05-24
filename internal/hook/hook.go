@@ -8,32 +8,16 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
-// Env carries the COCKPIT_* values that SessionStart embeds.
-type Env struct {
-	PrimaryRepo          string
-	DeclaredRelatedRepos string // raw, comma-separated
-	TaskName             string
-	PaneID               string
-}
-
-// Build returns the event envelope for (event, payload, env), or nil if the
+// Build returns the event envelope for (event, payload), or nil if the
 // hook should be silently dropped (unknown event, or a Notification whose
 // type isn't in the whitelist).
-func Build(event, sessionID string, payload map[string]any, env Env) map[string]any {
+func Build(event, sessionID string, payload map[string]any) map[string]any {
 	switch event {
 	case state.EventSessionStart:
-		var pane any
-		if env.PaneID != "" {
-			pane = env.PaneID
-		}
 		return envelope(event, sessionID, map[string]any{
-			"primary_repo":           env.PrimaryRepo,
-			"declared_related_repos": splitCSV(env.DeclaredRelatedRepos),
-			"task_name":              env.TaskName,
-			"cwd":                    payload["cwd"],
-			"pane_id":                pane,
-			"source":                 payload["source"],
-			"model":                  payload["model"],
+			"cwd":    payload["cwd"],
+			"source": payload["source"],
+			"model":  payload["model"],
 			// transcript_path is on every Claude Code hook payload. We
 			// capture it at SessionStart (stable for the session's life)
 			// so the recap reader knows which .jsonl to scan.
@@ -75,19 +59,4 @@ func envelope(event, sessionID string, payload map[string]any) map[string]any {
 		"session_id": sessionID,
 		"payload":    payload,
 	}
-}
-
-// splitCSV drops empty parts and always returns a non-nil slice so JSON
-// emits [] rather than null.
-func splitCSV(s string) []string {
-	out := []string{}
-	if s == "" {
-		return out
-	}
-	for _, p := range strings.Split(s, ",") {
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }

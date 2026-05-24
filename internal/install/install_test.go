@@ -197,38 +197,6 @@ func TestHooksInstalled_DeadCockpitPathReturnsFalse(t *testing.T) {
 	}
 }
 
-func TestEnsureHooks_RewritesDeadCockpitHookToPathBinary(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "cc-cockpit")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir)
-	settingsPath := filepath.Join(t.TempDir(), "settings.json")
-	dead := "/tmp/definitely-missing-cc-cockpit/cc-cockpit"
-	merged, err := MergeHooks(nil, dead)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(settingsPath, merged, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := EnsureHooks(settingsPath); err != nil {
-		t.Fatal(err)
-	}
-	updated, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(updated), dead) {
-		t.Fatalf("dead hook path was not replaced:\n%s", updated)
-	}
-	if !strings.Contains(string(updated), bin+" hook SessionStart") {
-		t.Fatalf("expected hook to use PATH binary %q, got:\n%s", bin, updated)
-	}
-}
-
 func TestInstallBin_PreservesExistingTargetWhenReplacementFails(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "cc-cockpit")

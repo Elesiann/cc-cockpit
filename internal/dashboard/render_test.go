@@ -12,18 +12,27 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/subagent"
 )
 
+// sessAt builds a fixture Session. The `repo` argument becomes the basename
+// of Cwd so sessionRepoLabel produces it. `task` is kept in the signature
+// for callsite readability but is no longer stored — the dashboard sources
+// task labels from /rename metadata, not from the Session itself.
 func sessAt(status, started, lastAct string, repo, task string) *state.Session {
+	_ = task
 	return &state.Session{
-		Status:               status,
-		StartedAt:            started,
-		LastActivity:         lastAct,
-		PrimaryRepo:          json.RawMessage(`"` + repo + `"`),
-		TaskName:             json.RawMessage(`"` + task + `"`),
-		DeclaredRelatedRepos: json.RawMessage("[]"),
-		Cwd:                  json.RawMessage("null"),
-		PaneID:               json.RawMessage("null"),
-		LastPromptPreview:    json.RawMessage("null"),
+		Status:            status,
+		StartedAt:         started,
+		LastActivity:      lastAct,
+		Cwd:               json.RawMessage(`"/fixture/` + repo + `"`),
+		LastPromptPreview: json.RawMessage("null"),
 	}
+}
+
+func renderOne(st state.State, now time.Time) string {
+	return RenderMulti([]TaggedState{{Name: "ws", State: st}}, "watch · 1 workspace(s)", now, nil, nil, nil)
+}
+
+func renderOneWithMetas(st state.State, now time.Time, metas map[string]SessionMeta) string {
+	return RenderMulti([]TaggedState{{Name: "ws", State: st}}, "watch · 1 workspace(s)", now, metas, nil, nil)
 }
 
 func TestRender_HeaderCounts(t *testing.T) {
@@ -36,10 +45,10 @@ func TestRender_HeaderCounts(t *testing.T) {
 		},
 		DroppedEvents: 2,
 	}
-	frame := Render(st, "myws", time.Date(2026, 4, 20, 15, 0, 30, 0, time.UTC))
+	frame := renderOne(st, time.Date(2026, 4, 20, 15, 0, 30, 0, time.UTC))
 	first := strings.SplitN(frame, "\n", 2)[0]
-	if !strings.Contains(first, "myws") {
-		t.Errorf("header missing workspace name: %q", first)
+	if !strings.Contains(first, "watch · 1 workspace(s)") {
+		t.Errorf("header missing aggregate title: %q", first)
 	}
 	if !strings.Contains(first, "active=3") {
 		t.Errorf("header active count: %q", first)
@@ -66,20 +75,16 @@ func TestRender_AllLinesFitDashboardPaneWidth(t *testing.T) {
 	st := state.State{
 		Sessions: map[string]*state.Session{
 			"abcdef0123456": {
-				Status:               state.StatusWaitingInput,
-				StartedAt:            "2026-04-20T15:00:00Z",
-				LastActivity:         "2026-04-20T15:00:00Z",
-				PrimaryRepo:          json.RawMessage(`"infrastructure"`),
-				TaskName:             json.RawMessage(`"refactor a really long task name that exceeds the cap"`),
-				DeclaredRelatedRepos: json.RawMessage("[]"),
-				Cwd:                  json.RawMessage("null"),
-				PaneID:               json.RawMessage("null"),
-				LastPromptPreview:    json.RawMessage("null"),
+				Status:            state.StatusWaitingInput,
+				StartedAt:         "2026-04-20T15:00:00Z",
+				LastActivity:      "2026-04-20T15:00:00Z",
+				Cwd:               json.RawMessage(`"/fixture/infrastructure"`),
+				LastPromptPreview: json.RawMessage("null"),
 			},
 		},
 		DroppedEvents: 12345,
 	}
-	frame := Render(st, "very-long-workspace-name", time.Date(2026, 4, 20, 15, 0, 0, 0, time.UTC))
+	frame := renderOne(st, time.Date(2026, 4, 20, 15, 0, 0, 0, time.UTC))
 	for i, line := range strings.Split(frame, "\n") {
 		if w := utf8.RuneCountInString(line); w > paneWidth {
 			t.Errorf("line %d (%d cols): %q", i, w, line)
@@ -89,7 +94,7 @@ func TestRender_AllLinesFitDashboardPaneWidth(t *testing.T) {
 
 func TestRender_NoActive_ShowsHelpfulMessage(t *testing.T) {
 	st := state.State{Sessions: map[string]*state.Session{}}
-	frame := Render(st, "ws", time.Now())
+	frame := renderOne(st, time.Now())
 	if !strings.Contains(frame, "no active sessions") {
 		t.Errorf("expected helpful message when no active, got %q", frame)
 	}
@@ -105,7 +110,7 @@ func TestRender_ActiveSectionMarker_ShowsCount(t *testing.T) {
 			"sid-b": sessAt("idle", "2026-05-17T11:59:01Z", "2026-05-17T11:59:31Z", "web", "task-b"),
 		},
 	}
-	frame := Render(st, "ws", time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC))
+	frame := renderOne(st, time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC))
 	if !strings.Contains(frame, "─── active (2) ───") {
 		t.Errorf("expected active section marker with count, got:\n%s", frame)
 	}
@@ -130,7 +135,7 @@ func TestRender_EndedFooter_ShowsLastThree(t *testing.T) {
 		s.EndedAt = json.RawMessage(`"` + ts + `"`)
 		st.Sessions[string(rune('a'+i))] = s
 	}
-	frame := Render(st, "ws", now)
+	frame := renderOne(st, now)
 	if !strings.Contains(frame, "ended (last 3)") {
 		t.Errorf("expected 'ended (last 3)' header, got: %q", frame)
 	}
@@ -165,7 +170,7 @@ func TestRender_EndedFooter_DropsAncient(t *testing.T) {
 		s.EndedAt = json.RawMessage(`"` + c.ts + `"`)
 		st.Sessions[c.key] = s
 	}
-	frame := Render(st, "ws", now)
+	frame := renderOne(st, now)
 	if !strings.Contains(frame, "ended (last 2)") {
 		t.Errorf("expected 'ended (last 2)' (one drop), got: %q", frame)
 	}
@@ -215,18 +220,15 @@ func TestRender_CommandsFooter_AlwaysVisible(t *testing.T) {
 	}
 	now := time.Date(2026, 4, 20, 15, 0, 5, 0, time.UTC)
 	for label, st := range map[string]state.State{"empty": empty, "with-session": withSession} {
-		frame := Render(st, "ws", now)
-		if !strings.Contains(frame, "start [<repo>] <task>") {
-			t.Errorf("[%s] cheatsheet missing the start example: %q", label, frame)
-		}
-		if !strings.Contains(frame, "start-fleet <repo>") {
-			t.Errorf("[%s] cheatsheet missing the start-fleet example: %q", label, frame)
-		}
+		frame := renderOne(st, now)
 		if !strings.Contains(frame, "end <prefix>") {
 			t.Errorf("[%s] cheatsheet missing the end example: %q", label, frame)
 		}
-		if !strings.Contains(frame, "control") {
-			t.Errorf("[%s] cheatsheet should reference the control pane: %q", label, frame)
+		if !strings.Contains(frame, "reap [--older-than DUR]") {
+			t.Errorf("[%s] cheatsheet missing the reap example: %q", label, frame)
+		}
+		if strings.Contains(frame, "control") || strings.Contains(frame, "start-fleet") {
+			t.Errorf("[%s] cheatsheet should not reference removed tmux controls: %q", label, frame)
 		}
 	}
 }
@@ -292,7 +294,7 @@ func TestRender_RunningShowsCurrentToolInstead(t *testing.T) {
 	s.CurrentTool = "Bash"
 
 	st := state.State{Sessions: map[string]*state.Session{"sid-a": s}}
-	frame := Render(st, "ws", now)
+	frame := renderOne(st, now)
 	if !strings.Contains(frame, "🔧 Bash") {
 		t.Errorf("expected `🔧 Bash` in frame for running+tool session, got:\n%s", frame)
 	}
@@ -309,7 +311,7 @@ func TestRender_RunningWithoutToolFallsBackToGenericLabel(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	s := sessAt(state.StatusRunning, "2026-05-17T11:59:55Z", "2026-05-17T11:59:55Z", "api", "task")
 	st := state.State{Sessions: map[string]*state.Session{"sid-a": s}}
-	frame := Render(st, "ws", now)
+	frame := renderOne(st, now)
 	if !strings.Contains(frame, "🔧 running") {
 		t.Errorf("expected `🔧 running` fallback when CurrentTool is empty, got:\n%s", frame)
 	}
@@ -335,7 +337,7 @@ func TestRenderMulti_IncludesWSColumn(t *testing.T) {
 			},
 		},
 	}
-	frame := RenderMulti(samples, "watch · 2 workspace(s)", now)
+	frame := RenderMulti(samples, "watch · 2 workspace(s)", now, nil, nil, nil)
 	if !strings.Contains(frame, "STATUS") || !strings.Contains(frame, "WS") {
 		t.Errorf("expected WS column header in multi render, got:\n%s", frame)
 	}
@@ -352,25 +354,9 @@ func TestRenderMulti_IncludesWSColumn(t *testing.T) {
 }
 
 func TestRenderMulti_NoSessions(t *testing.T) {
-	frame := RenderMulti(nil, "watch · 0 workspace(s)", time.Now())
+	frame := RenderMulti(nil, "watch · 0 workspace(s)", time.Now(), nil, nil, nil)
 	if !strings.Contains(frame, "no active sessions across any workspace") {
 		t.Errorf("expected friendly empty message, got:\n%s", frame)
-	}
-}
-
-func TestRender_SingleWorkspaceHasNoWSColumn(t *testing.T) {
-	// Sanity check: the existing single-workspace render must not regress
-	// by accidentally adding the WS column from the multi path.
-	st := state.State{
-		Sessions: map[string]*state.Session{
-			"sid-a": sessAt("running", "2026-04-20T15:00:00Z", "2026-04-20T15:00:00Z", "api", "fix"),
-		},
-	}
-	frame := Render(st, "ws", time.Date(2026, 4, 20, 15, 0, 5, 0, time.UTC))
-	// Header row in single mode: STATUS  SID  REPO  TASK  ACT (no WS).
-	headerLine := strings.Split(frame, "\n")[2]
-	if strings.Contains(headerLine, "\tWS\t") || strings.Contains(headerLine, " WS ") {
-		t.Errorf("single Render should not include WS column, got header: %q", headerLine)
 	}
 }
 
@@ -390,7 +376,7 @@ func TestEndedFooter_StableSortAcrossEqualEndedAt(t *testing.T) {
 	// Render 10 times; collect SID column order from each frame's ended rows.
 	var firstSeen []string
 	for i := 0; i < 10; i++ {
-		frame := Render(st, "ws", now)
+		frame := renderOne(st, now)
 		var order []string
 		for _, line := range strings.Split(frame, "\n") {
 			if strings.HasPrefix(line, "  ◼ ") {
@@ -437,7 +423,7 @@ func TestMultiEndedFooter_StableSortAcrossEqualEndedAt(t *testing.T) {
 	}
 	var firstSeen string
 	for i := 0; i < 10; i++ {
-		frame := RenderMulti(samples, "watch", now)
+		frame := RenderMulti(samples, "watch", now, nil, nil, nil)
 		if i == 0 {
 			firstSeen = frame
 			continue
@@ -457,8 +443,6 @@ func TestWatchFooter_HasExpectedCheatsheetEntries(t *testing.T) {
 		"end <prefix>",
 		"end all-non-ended --yes",
 		"reap [--older-than DUR]",
-		"open ",
-		"close <ws> --yes",
 		"Ctrl-C",
 		"legend:",
 		"? = stale",
@@ -466,6 +450,11 @@ func TestWatchFooter_HasExpectedCheatsheetEntries(t *testing.T) {
 	for _, w := range wants {
 		if !strings.Contains(footer, w) {
 			t.Errorf("watch footer missing %q\nFooter:\n%s", w, footer)
+		}
+	}
+	for _, removed := range []string{"open ", "close <ws> --yes", "start-fleet"} {
+		if strings.Contains(footer, removed) {
+			t.Errorf("watch footer still mentions removed command %q\nFooter:\n%s", removed, footer)
 		}
 	}
 	// Every line ≤ 80 visible cols. utf8.RuneCountInString matches the rest
@@ -512,30 +501,28 @@ func TestEndedFooter_StableAcrossSubMinuteTicks(t *testing.T) {
 	s.EndedAt = json.RawMessage(`"2026-04-21T11:59:45Z"`)
 	st.Sessions["a"] = s
 
-	f0 := Render(st, "ws", t0)
-	f1 := Render(st, "ws", t0.Add(500*time.Millisecond))
+	f0 := renderOne(st, t0)
+	f1 := renderOne(st, t0.Add(500*time.Millisecond))
 	if f0 != f1 {
 		t.Errorf("ended footer should be stable within a minute; diff:\n--- t0 ---\n%s\n--- t0+500ms ---\n%s", f0, f1)
 	}
 }
 
-func TestSessionTaskLabel_NameOverridesTaskName(t *testing.T) {
-	s := &state.Session{TaskName: json.RawMessage(`"original task"`)}
-	got := sessionTaskLabel(s, SessionMeta{Name: "my-rename"})
+func TestSessionTaskLabel_UsesRenameMeta(t *testing.T) {
+	got := sessionTaskLabel(&state.Session{}, SessionMeta{Name: "my-rename"})
 	if got != "my-rename" {
-		t.Errorf("got %q, want my-rename (meta.Name wins)", got)
+		t.Errorf("got %q, want my-rename", got)
 	}
 }
 
-func TestSessionTaskLabel_NoMetaFallsBackToTaskName(t *testing.T) {
-	s := &state.Session{TaskName: json.RawMessage(`"original task"`)}
-	got := sessionTaskLabel(s, SessionMeta{})
-	if got != "original task" {
-		t.Errorf("got %q, want original task", got)
+func TestSessionTaskLabel_NoMetaReturnsDash(t *testing.T) {
+	got := sessionTaskLabel(&state.Session{}, SessionMeta{})
+	if got != "—" {
+		t.Errorf("got %q, want em-dash", got)
 	}
 }
 
-func TestRenderWithMetas_AppliesNameAndColor(t *testing.T) {
+func TestRenderMulti_AppliesNameAndColor(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	st := state.State{
 		Sessions: map[string]*state.Session{
@@ -545,12 +532,12 @@ func TestRenderWithMetas_AppliesNameAndColor(t *testing.T) {
 	metas := map[string]SessionMeta{
 		"abcd1234": {Name: "renamed", Color: "red"},
 	}
-	frame := RenderWithMetas(st, "ws", now, metas)
+	frame := renderOneWithMetas(st, now, metas)
 	if !strings.Contains(frame, "renamed") {
 		t.Errorf("expected `renamed` in TASK column, got:\n%s", frame)
 	}
 	if strings.Contains(frame, "old task") {
-		t.Errorf("original task_name should be overridden, still present:\n%s", frame)
+		t.Errorf("/rename should be the only task source, raw task leaked:\n%s", frame)
 	}
 	if !strings.Contains(frame, "\033[31m") || !strings.Contains(frame, "\033[0m") {
 		t.Errorf("expected ANSI red wrap on data row, got:\n%s", frame)
@@ -567,7 +554,7 @@ func TestRenderMultiWithAgentRollups_ShowsOneSubtleLinePerParent(t *testing.T) {
 		}},
 	}}
 
-	frame := RenderMultiWithMetasRecapsAndAgents(samples, "watch", now, nil, nil, map[string]subagent.Rollup{
+	frame := RenderMulti(samples, "watch", now, nil, nil, map[string]subagent.Rollup{
 		"parent-session-1": {Total: 3, Active: 1, Done: 2, LatestDescription: "Design duplicate-plugin detection"},
 	})
 
@@ -598,7 +585,7 @@ func TestRenderMultiWithRecaps_ShowsSubtleOneLineRecapOnlyForIdleSessions(t *tes
 		"waiting8901": "Waiting recap must not render.",
 	}
 
-	frame := RenderMultiWithMetasAndRecaps(samples, "watch", now, nil, recaps)
+	frame := RenderMulti(samples, "watch", now, nil, recaps, nil)
 	if !strings.Contains(frame, "\033[90m    ↳ recap: Goal: clear migration pendencies.") {
 		t.Fatalf("expected subtle gray one-line recap under idle session, got:\n%s", frame)
 	}
@@ -610,31 +597,15 @@ func TestRenderMultiWithRecaps_ShowsSubtleOneLineRecapOnlyForIdleSessions(t *tes
 	}
 }
 
-func TestSessionRepoLabel_PrimaryRepoWins(t *testing.T) {
-	s := &state.Session{
-		PrimaryRepo: json.RawMessage(`"api"`),
-		Cwd:         json.RawMessage(`"/home/u/elsewhere"`),
-	}
-	if got := sessionRepoLabel(s); got != "api" {
-		t.Errorf("got %q, want api", got)
-	}
-}
-
-func TestSessionRepoLabel_FallsBackToCwdBasename(t *testing.T) {
-	s := &state.Session{
-		PrimaryRepo: json.RawMessage(`""`),
-		Cwd:         json.RawMessage(`"/home/u/projects/api"`),
-	}
+func TestSessionRepoLabel_UsesCwdBasename(t *testing.T) {
+	s := &state.Session{Cwd: json.RawMessage(`"/home/u/projects/api"`)}
 	if got := sessionRepoLabel(s); got != "api" {
 		t.Errorf("got %q, want api (from cwd basename)", got)
 	}
 }
 
-func TestSessionRepoLabel_NullEverything_ReturnsDash(t *testing.T) {
-	s := &state.Session{
-		PrimaryRepo: json.RawMessage("null"),
-		Cwd:         json.RawMessage("null"),
-	}
+func TestSessionRepoLabel_NullCwd_ReturnsDash(t *testing.T) {
+	s := &state.Session{Cwd: json.RawMessage("null")}
 	if got := sessionRepoLabel(s); got != "—" {
 		t.Errorf("got %q, want em-dash", got)
 	}

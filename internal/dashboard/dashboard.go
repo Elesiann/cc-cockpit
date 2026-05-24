@@ -16,24 +16,9 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
-// Options tunes Run's behavior. Empty values are fine — Run picks safe
-// defaults so most callers can pass dashboard.Options{}.
-type Options struct {
-	// ApplyTmuxBorderColors is true only for the in-cockpit dashboard,
-	// where the dashboard pane is a sibling of the Claude panes and can
-	// color their borders. `watch` runs outside tmux and must skip this.
-	ApplyTmuxBorderColors bool
-	// WriteCurrentJSON is true only for the in-cockpit dashboard. The
-	// current.json file is a per-workspace artifact that lives next to
-	// events.jsonl; aggregate mode skips it (no clear place to put it,
-	// and nothing consumes it from the watch view).
-	WriteCurrentJSON bool
-}
-
 // Run drives the dashboard loop until SIGINT/SIGTERM/SIGHUP/SIGQUIT. The
-// Source supplies one Sample per tick; the loop renders, rings the bell, and
-// (when configured) repaints tmux pane borders.
-func Run(src Source, opts Options) error {
+// Source supplies one Sample per tick; the loop renders and rings the bell.
+func Run(src Source) error {
 	fmt.Print("\033[?1049h\033[?25l")
 	defer fmt.Print("\033[?25h\033[?1049l")
 
@@ -60,8 +45,6 @@ func Run(src Source, opts Options) error {
 	}
 
 	var prevFrame string
-	prevCurrentJSON := make(map[string][]byte)
-	prevPaneColor := make(map[string]string)
 	recaps := newRecapCache()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -73,23 +56,11 @@ func Run(src Source, opts Options) error {
 			stageErr = "snapshot: " + err.Error()
 		}
 
-		// Seed bell baselines for workspaces that appeared after Run started
-		// (a `cc-cockpit open` in another terminal creates a new state dir
-		// mid-watch). Without this we'd ring on the historical backlog.
+		// Seed bell baselines for workspaces that appeared after Run started.
+		// Without this we'd ring on the historical backlog.
 		for _, s := range samples {
 			if _, seen := lastBellSeq[s.StateHome]; !seen {
 				lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
-			}
-		}
-
-		if opts.WriteCurrentJSON {
-			for _, s := range samples {
-				if buf, mErr := marshalCurrent(s.State); mErr == nil {
-					if !bytes.Equal(buf, prevCurrentJSON[s.StateHome]) {
-						writeAtomic(filepath.Join(s.StateHome, "current.json"), buf)
-						prevCurrentJSON[s.StateHome] = buf
-					}
-				}
 			}
 		}
 
@@ -97,14 +68,7 @@ func Run(src Source, opts Options) error {
 		metas := LoadSessionMetas(home)
 		recapTexts := recaps.load(samples)
 		agentRollups := loadSubagentRollups(samples, now)
-		var frame string
-		if src.IsMulti() {
-			frame = RenderMultiWithMetasRecapsAndAgents(samples, src.HeaderName(samples), now, metas, recapTexts, agentRollups)
-		} else if len(samples) > 0 {
-			frame = RenderWithMetasRecapsAndAgents(samples[0].State, src.HeaderName(samples), now, metas, recapTexts, agentRollups)
-		} else {
-			frame = RenderWithMetasRecapsAndAgents(state.State{}, src.HeaderName(samples), now, metas, recapTexts, agentRollups)
-		}
+		frame := RenderMulti(samples, src.HeaderName(samples), now, metas, recapTexts, agentRollups)
 		if stageErr != "" {
 			frame = "⚠ DASHBOARD STAGE FAILED: " + stageErr + " — displayed state may be stale.\n" +
 				"────────────────────────────────────────────────────────────────\n" + frame
@@ -128,7 +92,7 @@ func Run(src Source, opts Options) error {
 			if info.NewAttention > 0 {
 				totalAttention += info.NewAttention
 				if attentionRepo == "" {
-					attentionRepo, attentionTask = pickAttentionLabels(s.State)
+					attentionRepo, attentionTask = pickAttentionLabels(s.State, metas)
 				}
 			}
 			if info.MaxSeq > lastBellSeq[s.StateHome] {
@@ -140,10 +104,6 @@ func Run(src Source, opts Options) error {
 		if totalAttention > 0 {
 			fmt.Print("\a")
 			notify.Notify(buildNotifyMessage(totalAttention, attentionRepo, attentionTask))
-		}
-
-		if opts.ApplyTmuxBorderColors && len(samples) > 0 {
-			applyPaneBorderColors(samples[0].State, prevPaneColor)
 		}
 
 		select {
@@ -203,10 +163,20 @@ func computeBell(data []byte, lastBellSeq int64) bellInfo {
 // pickAttentionLabels returns repo/task for the first waiting_input session
 // in st. Used to label the desktop notification. Best-effort: when nothing
 // matches, returns ("", "") and the caller falls back to a generic message.
-func pickAttentionLabels(st state.State) (repo, task string) {
-	for _, s := range st.Sessions {
+// metas carries Claude Code's /rename values so notifications match what the
+// user sees in the dashboard.
+func pickAttentionLabels(st state.State, metas map[string]SessionMeta) (repo, task string) {
+	for sid, s := range st.Sessions {
 		if s.Status == state.StatusWaitingInput {
-			return jsonRawString(s.PrimaryRepo, ""), jsonRawString(s.TaskName, "")
+			repo = sessionRepoLabel(s)
+			task = sessionTaskLabel(s, metas[sid])
+			if task == "—" {
+				task = ""
+			}
+			if repo == "—" {
+				repo = ""
+			}
+			return repo, task
 		}
 	}
 	return "", ""
@@ -230,15 +200,4 @@ func writeAtomic(path string, data []byte) {
 		return
 	}
 	_ = os.Rename(tmp, path)
-}
-
-func marshalCurrent(st state.State) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetIndent("", "  ")
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(st); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }

@@ -26,46 +26,16 @@ type TaggedState struct {
 
 // Source is the read side of events.jsonl. Each tick the runtime calls Sample
 // once and renders/bell-rings from the result. Implementations must be
-// concurrency-safe with the writer (use a shared flock on events.lock — see
-// SingleSource.Sample for the canonical pattern).
+// concurrency-safe with the writer using a shared flock on events.lock.
 type Source interface {
 	// Sample returns the current reduced state per workspace. Returns the
 	// slice as-is on partial failure (a missing file in one workspace
 	// doesn't block the others) and an error only when no workspace at all
 	// could be read.
 	Sample() ([]TaggedState, error)
-	// HeaderName is what gets shown in the title bar. Single workspace
-	// shows its name; aggregate shows "watch (N workspaces)" or similar.
+	// HeaderName is what gets shown in the title bar.
 	HeaderName(samples []TaggedState) string
-	// IsMulti is true when the renderer should include the WS column.
-	IsMulti() bool
 }
-
-// SingleSource is the in-cockpit dashboard's view of one workspace.
-type SingleSource struct {
-	StateHome     string
-	WorkspaceName string
-}
-
-func (s SingleSource) Sample() ([]TaggedState, error) {
-	if err := os.MkdirAll(s.StateHome, 0o755); err != nil {
-		return nil, err
-	}
-	raw, err := snapshotBytes(s.StateHome)
-	if err != nil {
-		return nil, err
-	}
-	st := state.Reduce(bytes.NewReader(raw))
-	return []TaggedState{{
-		Name:      s.WorkspaceName,
-		StateHome: s.StateHome,
-		State:     st,
-		Raw:       raw,
-	}}, nil
-}
-
-func (s SingleSource) HeaderName([]TaggedState) string { return s.WorkspaceName }
-func (s SingleSource) IsMulti() bool                   { return false }
 
 // AggregateSource is `cc-cockpit watch`'s view: every state dir under the
 // cc-cockpit state root that has an events.jsonl. Per-source Reduce keeps each
@@ -109,10 +79,7 @@ func (a AggregateSource) HeaderName(samples []TaggedState) string {
 	return fmt.Sprintf("watch · %d workspace(s)", len(samples))
 }
 
-func (a AggregateSource) IsMulti() bool { return true }
-
-// snapshotBytes is the shared flock-protected read of events.jsonl. Lifted
-// from the original dashboard.snapshot so both Sources use the same pattern.
+// snapshotBytes is the shared flock-protected read of events.jsonl.
 func snapshotBytes(stateHome string) ([]byte, error) {
 	lockPath := filepath.Join(stateHome, "events.lock")
 	logPath := filepath.Join(stateHome, "events.jsonl")

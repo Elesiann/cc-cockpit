@@ -52,22 +52,18 @@ type Event struct {
 // the order jq inserts them, and omitempty controls whether late-added fields
 // (resumed_at, ended_at, dismissed, revived_at) appear before they're set.
 type Session struct {
-	SessionID            string          `json:"session_id"`
-	PrimaryRepo          json.RawMessage `json:"primary_repo"`
-	DeclaredRelatedRepos json.RawMessage `json:"declared_related_repos"`
-	TaskName             json.RawMessage `json:"task_name"`
-	Cwd                  json.RawMessage `json:"cwd"`
-	TranscriptPath       json.RawMessage `json:"transcript_path"`
-	PaneID               json.RawMessage `json:"pane_id"`
-	Status               string          `json:"status"`
-	StartedAt            string          `json:"started_at"`
-	LastActivity         string          `json:"last_activity"`
-	LastPromptPreview    json.RawMessage `json:"last_prompt_preview"`
-	CurrentTool          string          `json:"current_tool,omitempty"`
-	ResumedAt            string          `json:"resumed_at,omitempty"`
-	EndedAt              json.RawMessage `json:"ended_at,omitempty"`
-	Dismissed            *bool           `json:"dismissed,omitempty"`
-	RevivedAt            string          `json:"revived_at,omitempty"`
+	SessionID         string          `json:"session_id"`
+	Cwd               json.RawMessage `json:"cwd"`
+	TranscriptPath    json.RawMessage `json:"transcript_path"`
+	Status            string          `json:"status"`
+	StartedAt         string          `json:"started_at"`
+	LastActivity      string          `json:"last_activity"`
+	LastPromptPreview json.RawMessage `json:"last_prompt_preview"`
+	CurrentTool       string          `json:"current_tool,omitempty"`
+	ResumedAt         string          `json:"resumed_at,omitempty"`
+	EndedAt           json.RawMessage `json:"ended_at,omitempty"`
+	Dismissed         *bool           `json:"dismissed,omitempty"`
+	RevivedAt         string          `json:"revived_at,omitempty"`
 }
 
 type State struct {

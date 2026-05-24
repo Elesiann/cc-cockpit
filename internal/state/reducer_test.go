@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// Fixtures lifted from test/smoke.sh §[9], [12], [13], [14] so behavior is
-// locked to the same scenarios the bash reducer is tested against.
 const (
-	fixtureMalformed = `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"r","declared_related_repos":[],"task_name":"t","cwd":"/x"}}
+	fixtureMalformed = `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"cwd":"/x"}}
 THIS LINE IS NOT JSON
 {"seq":99,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","payload":{}}
 {"seq":100,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"bad","payload":[]}
@@ -19,8 +17,8 @@ THIS LINE IS NOT JSON
 {"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"Notification","session_id":"s1","payload":{"notification_type":"idle_prompt"}}
 {"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"PostToolUse","session_id":"s1","payload":{"tool_name":"W"}}`
 
-	fixtureDismiss = `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"a","payload":{"primary_repo":"r","task_name":"ta","declared_related_repos":[]}}
-{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"SessionStart","session_id":"b","payload":{"primary_repo":"r","task_name":"tb","declared_related_repos":[]}}
+	fixtureDismiss = `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"a","payload":{}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"SessionStart","session_id":"b","payload":{}}
 {"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"SessionEnd","session_id":"a","payload":{"synthetic":true}}
 {"seq":4,"wall_clock_iso8601":"2026-04-20T15:00:03Z","event_type":"SessionEnd","session_id":"b","payload":{}}
 {"seq":5,"wall_clock_iso8601":"2026-04-20T15:00:04Z","event_type":"UserPromptSubmit","session_id":"a","payload":{"prompt_preview":"alive"}}
@@ -67,9 +65,9 @@ func TestReducer_TransientNotificationCollapses(t *testing.T) {
 }
 
 func TestReducer_ResumeAfterNaturalEndReopensSession(t *testing.T) {
-	input := `{"seq":1,"wall_clock_iso8601":"2026-05-19T23:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"api","declared_related_repos":[],"task_name":"old task","cwd":"/old","source":"startup"}}
+	input := `{"seq":1,"wall_clock_iso8601":"2026-05-19T23:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"cwd":"/old","source":"startup"}}
 {"seq":2,"wall_clock_iso8601":"2026-05-19T23:10:00Z","event_type":"SessionEnd","session_id":"s1","payload":{}}
-{"seq":3,"wall_clock_iso8601":"2026-05-20T12:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"","declared_related_repos":[],"task_name":"","cwd":"/new","source":"resume"}}
+{"seq":3,"wall_clock_iso8601":"2026-05-20T12:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"cwd":"/new","source":"resume"}}
 {"seq":4,"wall_clock_iso8601":"2026-05-20T12:01:00Z","event_type":"UserPromptSubmit","session_id":"s1","payload":{"prompt_preview":"back at it"}}`
 
 	st := Reduce(strings.NewReader(input))
@@ -247,17 +245,6 @@ func TestReducer_PreToolUseSetsCurrentTool(t *testing.T) {
 	}
 	if s1.CurrentTool != "WebFetch" {
 		t.Errorf("CurrentTool: got %q, want WebFetch", s1.CurrentTool)
-	}
-}
-
-func TestReducer_LegacyZellijPaneIDFieldStillRead(t *testing.T) {
-	// Pre-v0.3 logs have zellij_pane_id in the SessionStart payload. The
-	// reducer reads either field name and stores it in PaneID for back-compat.
-	input := `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{"primary_repo":"r","task_name":"t","declared_related_repos":[],"zellij_pane_id":"%9"}}`
-	st := Reduce(strings.NewReader(input))
-	got := string(st.Sessions["s1"].PaneID)
-	if got != `"%9"` {
-		t.Errorf("PaneID from legacy zellij_pane_id: got %q, want \"%%9\"", got)
 	}
 }
 

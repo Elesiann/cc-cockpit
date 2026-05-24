@@ -32,65 +32,11 @@ const IdleAfterCompleted = 10 * time.Minute
 // in view. The full history is still preserved in events.jsonl.
 const EndedFooterMaxAge = 24 * time.Hour
 
-// Render produces the dashboard frame for st as of now (single-workspace
-// view: no WS column). Uses default rendering (no /rename or /color
-// metadata). Callers that want those should use RenderWithMetas.
-func Render(st state.State, workspaceName string, now time.Time) string {
-	return RenderWithMetas(st, workspaceName, now, nil)
-}
-
-// RenderWithMetas is Render plus a sessionId → SessionMeta lookup. When the
-// map carries a Name for a session, it overrides the TASK column. When it
-// carries a Color, the row is wrapped in the matching ANSI escape so the
-// user's /color choice surfaces visually.
-func RenderWithMetas(st state.State, workspaceName string, now time.Time, metas map[string]SessionMeta) string {
-	return RenderWithMetasAndRecaps(st, workspaceName, now, metas, nil)
-}
-
-// RenderWithMetasAndRecaps is RenderWithMetas plus optional native Claude Code
-// recaps keyed by session_id. Missing recaps are omitted — no placeholder — so
-// the dashboard only spends vertical space on signal that already exists.
-func RenderWithMetasAndRecaps(st state.State, workspaceName string, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
-	return RenderWithMetasRecapsAndAgents(st, workspaceName, now, metas, recaps, nil)
-}
-
-// RenderWithMetasRecapsAndAgents is RenderWithMetasAndRecaps plus optional
-// parent session_id → subagent rollup summaries.
-func RenderWithMetasRecapsAndAgents(st state.State, workspaceName string, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
-	var b strings.Builder
-	b.WriteString(renderHeader(st, workspaceName))
-	b.WriteString("\n\n")
-	b.WriteString(renderActiveTable(st, now, metas, recaps, agents))
-	if footer := renderEndedFooter(st, now); footer != "" {
-		b.WriteString("\n\n")
-		b.WriteString(footer)
-	}
-	b.WriteString("\n\n")
-	b.WriteString(renderCommandsFooter())
-	return b.String()
-}
-
 // RenderMulti renders aggregated samples for `watch` mode. Adds a WS column
-// and a header that summarizes across all workspaces. Same metas behavior
-// as Render (no metas → default rendering).
-func RenderMulti(samples []TaggedState, title string, now time.Time) string {
-	return RenderMultiWithMetas(samples, title, now, nil)
-}
-
-// RenderMultiWithMetas is RenderMulti plus /rename + /color metadata.
-func RenderMultiWithMetas(samples []TaggedState, title string, now time.Time, metas map[string]SessionMeta) string {
-	return RenderMultiWithMetasAndRecaps(samples, title, now, metas, nil)
-}
-
-// RenderMultiWithMetasAndRecaps is RenderMultiWithMetas plus optional native
-// Claude Code recaps keyed by session_id.
-func RenderMultiWithMetasAndRecaps(samples []TaggedState, title string, now time.Time, metas map[string]SessionMeta, recaps map[string]string) string {
-	return RenderMultiWithMetasRecapsAndAgents(samples, title, now, metas, recaps, nil)
-}
-
-// RenderMultiWithMetasRecapsAndAgents is RenderMultiWithMetasAndRecaps plus
-// optional parent session_id → subagent rollup summaries.
-func RenderMultiWithMetasRecapsAndAgents(samples []TaggedState, title string, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
+// and a header that summarizes across all workspaces. metas (/rename, /color),
+// recaps (native Claude Code away_summary), and agents (subagent rollups) are
+// all optional — pass nil to skip any of them.
+func RenderMulti(samples []TaggedState, title string, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
 	var b strings.Builder
 	b.WriteString(renderMultiHeader(samples, title))
 	b.WriteString("\n\n")
@@ -125,35 +71,6 @@ func statusBucket(s string) (busy, wait, idle bool) {
 	return false, false, false
 }
 
-func renderHeader(st state.State, ws string) string {
-	var active, busy, wait, idle, ended int
-	for _, s := range st.Sessions {
-		if s.Status == state.StatusEnded {
-			ended++
-			continue
-		}
-		b, w, i := statusBucket(s.Status)
-		if b {
-			busy++
-			active++
-		}
-		if w {
-			wait++
-			active++
-		}
-		if i {
-			idle++
-			active++
-		}
-	}
-	h := fmt.Sprintf("── %s ──  active=%d  🔧 %d  ⏸️ %d  💤 %d  ended=%d ──",
-		truncRunes(ws, 16), active, busy, wait, idle, ended)
-	if st.DroppedEvents > 0 {
-		h += fmt.Sprintf("\n⚠ %d malformed events skipped", st.DroppedEvents)
-	}
-	return h
-}
-
 func renderMultiHeader(samples []TaggedState, title string) string {
 	var active, busy, wait, idle, ended, dropped int
 	for _, s := range samples {
@@ -184,60 +101,6 @@ func renderMultiHeader(samples []TaggedState, title string) string {
 		h += fmt.Sprintf("\n⚠ %d malformed events skipped", dropped)
 	}
 	return h
-}
-
-func renderActiveTable(st state.State, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
-	type row struct {
-		sid  string
-		sess *state.Session
-	}
-	var active []row
-	for sid, s := range st.Sessions {
-		if s.Status != state.StatusEnded {
-			active = append(active, row{sid, s})
-		}
-	}
-	// Tiebreaker on sid so two sessions started in the same second don't
-	// swap places between ticks (Go map iteration is randomized; sort.Slice
-	// is not stable).
-	sort.Slice(active, func(i, j int) bool {
-		if active[i].sess.StartedAt != active[j].sess.StartedAt {
-			return active[i].sess.StartedAt < active[j].sess.StartedAt
-		}
-		return active[i].sid < active[j].sid
-	})
-	if len(active) == 0 {
-		return "─── active (0) ───\n  (no active sessions — start [<repo>] <task>)"
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "─── active (%d) ───\n", len(active))
-	tw := tabwriter.NewWriter(&b, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "  STATUS\tSID\tREPO\tTASK\tACT")
-	sids := make([]string, len(active))
-	recapSids := make([]string, len(active))
-	for i, r := range active {
-		s := r.sess
-		// Caps chosen so a worst-case row fits an 80-col dashboard pane after
-		// tabwriter padding: indent(2) + status(9) + sid(8) + repo(18) + task(30) +
-		// act(5) + 4×2 padding = 80, with breathing room for typical content.
-		repo := truncRunes(sessionRepoLabel(s), 18)
-		task := truncRunes(sessionTaskLabel(s, metas[r.sid]), 30)
-		fmt.Fprintf(tw, "  %s %s\t%s\t%s\t%s\t%s\n",
-			glyph(effectiveStatus(s, now)), shortStatusWithStale(s, now),
-			shortSID(r.sid),
-			repo,
-			task,
-			activitySince(s.LastActivity, now, false),
-		)
-		sids[i] = r.sid
-		if effectiveStatus(s, now) == state.StatusIdle {
-			recapSids[i] = r.sid
-		}
-	}
-	_ = tw.Flush()
-	table := colorizeDataRowsWithHeader(b.String(), sids, metas)
-	return insertSessionHints(table, sids, recaps, agents, recapSids, 2)
 }
 
 func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
@@ -293,62 +156,6 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 	return insertSessionHints(table, sids, recaps, agents, recapSids, 2)
 }
 
-func renderEndedFooter(st state.State, now time.Time) string {
-	type row struct {
-		sid     string
-		sess    *state.Session
-		sortKey string
-	}
-	var ended []row
-	for sid, s := range st.Sessions {
-		if s.Status != state.StatusEnded {
-			continue
-		}
-		key := jsonRawString(s.EndedAt, "")
-		if key == "" {
-			key = s.LastActivity
-		}
-		// Drop ancient endings. Parseable timestamps older than the cap go;
-		// unparseable timestamps fall through (better visible than silenced).
-		if t, err := time.Parse(time.RFC3339, key); err == nil {
-			if now.Sub(t) > EndedFooterMaxAge {
-				continue
-			}
-		}
-		ended = append(ended, row{sid, s, key})
-	}
-	if len(ended) == 0 {
-		return ""
-	}
-	// Tiebreaker on sid for stable ordering when two sessions share EndedAt
-	// (e.g. `reap` ending several in the same wall-clock second).
-	sort.Slice(ended, func(i, j int) bool {
-		if ended[i].sortKey != ended[j].sortKey {
-			return ended[i].sortKey > ended[j].sortKey
-		}
-		return ended[i].sid < ended[j].sid
-	})
-	if len(ended) > 3 {
-		ended = ended[:3]
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "─── ended (last %d) ───\n", len(ended))
-	for _, r := range ended {
-		when := jsonRawString(r.sess.EndedAt, "")
-		if when == "" {
-			when = r.sess.LastActivity
-		}
-		fmt.Fprintf(&b, "  ◼ %s  %s  %s  (%s)\n",
-			shortSID(r.sid),
-			jsonRawString(r.sess.PrimaryRepo, "—"),
-			jsonRawString(r.sess.TaskName, "—"),
-			endedAgo(when, now),
-		)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
 func renderMultiEndedFooter(samples []TaggedState, now time.Time) string {
 	type row struct {
 		sid     string
@@ -365,6 +172,13 @@ func renderMultiEndedFooter(samples []TaggedState, now time.Time) string {
 			key := jsonRawString(sess.EndedAt, "")
 			if key == "" {
 				key = sess.LastActivity
+			}
+			// Drop ancient endings. Parseable timestamps older than the cap go;
+			// unparseable timestamps fall through (better visible than silenced).
+			if t, err := time.Parse(time.RFC3339, key); err == nil {
+				if now.Sub(t) > EndedFooterMaxAge {
+					continue
+				}
 			}
 			ended = append(ended, row{sid, s.Name, sess, key})
 		}
@@ -393,41 +207,22 @@ func renderMultiEndedFooter(samples []TaggedState, now time.Time) string {
 		fmt.Fprintf(&b, "  ◼ %s  [%s]  %s  %s  (%s)\n",
 			shortSID(r.sid),
 			truncRunes(r.ws, 12),
-			jsonRawString(r.sess.PrimaryRepo, "—"),
-			jsonRawString(r.sess.TaskName, "—"),
+			sessionRepoLabel(r.sess),
+			sessionTaskLabel(r.sess, SessionMeta{}),
 			endedAgo(when, now),
 		)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// renderCommandsFooter prints a stable cheatsheet so a first-time user
-// knows the commands and where to run them (the "control" pane, not
-// here). Kept short so it never pushes the table off screen on a normal
-// terminal height. Command names are the bash aliases the control pane
-// installs at open time (see controlBashrc in cmd/cc-cockpit/main.go) —
-// type the short form, no `cc-cockpit` prefix needed.
-func renderCommandsFooter() string {
-	return strings.Join([]string{
-		"─── commands ─── (run them in the \"control\" pane →)",
-		"  start [<repo>] <task>      spawn a Claude session (repo auto-detected)",
-		"  start-fleet <repo> [name]  open an Agent View pane (multi-agent)",
-		"  end <prefix>               end a session and close its pane",
-		"  Ctrl-b d                   detach (sessions persist)",
-	}, "\n")
-}
-
-// renderWatchFooter is the cheatsheet for `cc-cockpit watch` — read-only
-// viewer with no control pane. Lists the verbs that work from any terminal
-// (no cockpit env required) plus the exit hint and the `?` legend.
+// renderWatchFooter is the cheatsheet for `cc-cockpit watch`. Lists the verbs
+// that work from any terminal plus the exit hint and the `?` legend.
 func renderWatchFooter() string {
 	return strings.Join([]string{
 		"─── commands ─── (in any terminal, prefix `cc-cockpit`)",
-		"  end <prefix>               end a session (any workspace)",
+		"  end <prefix>               end a session in dashboard state",
 		"  end all-non-ended --yes    nuke every non-ended session",
 		"  reap [--older-than DUR]    sweep stale sessions (default: idle > 1h)",
-		"  open                       open the cockpit for cwd's workspace",
-		"  close <ws> --yes           kill a workspace's cockpit",
 		"  Ctrl-C                     exit watch",
 		"  legend: 🔧 tool 🤔 think ⏳ proc ⏸️ wait ✅ done 💤 idle  ? = stale 15m+",
 	}, "\n")
@@ -538,17 +333,14 @@ func truncRunes(s string, n int) string {
 	return string(r[:n])
 }
 
-// jsonRawString unwraps a json.RawMessage of either string or null. The
-// reducer stores per-session fields this way to faithfully copy whatever
-// the payload had.
-// sessionTaskLabel returns the TASK column value, honoring `/rename` when
-// the user has set a name for this session. Falls back to the cc-cockpit
-// task_name from SessionStart, then to "—".
-func sessionTaskLabel(s *state.Session, meta SessionMeta) string {
+// sessionTaskLabel returns the TASK column value. Uses Claude Code's
+// `/rename` value from meta when set; otherwise "—". Watch-only mode has
+// no other source of a per-session task label.
+func sessionTaskLabel(_ *state.Session, meta SessionMeta) string {
 	if meta.Name != "" {
 		return meta.Name
 	}
-	return jsonRawString(s.TaskName, "—")
+	return "—"
 }
 
 // colorizeDataRows post-processes the tabwriter-formatted table by wrapping
@@ -581,13 +373,6 @@ func colorizeDataRows(table string, sids []string, metas map[string]SessionMeta,
 // (`─── active (N) ───`) followed by the tabwriter column header.
 func colorizeDataRowsWithHeader(table string, sids []string, metas map[string]SessionMeta) string {
 	return colorizeDataRows(table, sids, metas, 2)
-}
-
-// insertRecapBlocks inserts optional recap blocks immediately below their
-// matching session rows. Kept as a small wrapper for tests/callers that only
-// care about recaps.
-func insertRecapBlocks(table string, sids []string, recaps map[string]string, preambleLines int) string {
-	return insertSessionHints(table, sids, recaps, nil, sids, preambleLines)
 }
 
 func insertSessionHints(table string, sids []string, recaps map[string]string, agents map[string]subagent.Rollup, recapSids []string, preambleLines int) string {
@@ -675,14 +460,9 @@ func truncRunesWithEllipsis(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
-// sessionRepoLabel returns the display label for a session's REPO column.
-// Explicit primary_repo wins (set by `cc-cockpit start`); otherwise we fall
-// back to the basename of cwd so interactive `claude` sessions (no env, no
-// task name) still get a meaningful identifier instead of "—".
+// sessionRepoLabel returns the display label for a session's REPO column:
+// the basename of the session's cwd, or "—" when cwd is missing/root.
 func sessionRepoLabel(s *state.Session) string {
-	if r := jsonRawString(s.PrimaryRepo, ""); r != "" {
-		return r
-	}
 	if c := jsonRawString(s.Cwd, ""); c != "" {
 		if base := filepath.Base(c); base != "" && base != "." && base != "/" {
 			return base

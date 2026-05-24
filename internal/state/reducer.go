@@ -203,18 +203,10 @@ func isDismissed(s *Session) bool {
 // on a missing key yielding null).
 func newSessionFromStart(ev *Event) *Session {
 	var p struct {
-		PrimaryRepo          json.RawMessage `json:"primary_repo"`
-		DeclaredRelatedRepos json.RawMessage `json:"declared_related_repos"`
-		TaskName             json.RawMessage `json:"task_name"`
-		Cwd                  json.RawMessage `json:"cwd"`
-		TranscriptPath       json.RawMessage `json:"transcript_path"`
-		PaneID               json.RawMessage `json:"pane_id"`
-		LegacyPaneID         json.RawMessage `json:"zellij_pane_id"` // pre-v0.3 logs
+		Cwd            json.RawMessage `json:"cwd"`
+		TranscriptPath json.RawMessage `json:"transcript_path"`
 	}
 	_ = json.Unmarshal(ev.Payload, &p)
-	if len(p.PaneID) == 0 {
-		p.PaneID = p.LegacyPaneID
-	}
 
 	defaultNull := func(b json.RawMessage) json.RawMessage {
 		if len(b) == 0 {
@@ -224,13 +216,9 @@ func newSessionFromStart(ev *Event) *Session {
 	}
 
 	return &Session{
-		SessionID:            ev.SessionID,
-		PrimaryRepo:          defaultNull(p.PrimaryRepo),
-		DeclaredRelatedRepos: defaultNull(p.DeclaredRelatedRepos),
-		TaskName:             defaultNull(p.TaskName),
-		Cwd:                  defaultNull(p.Cwd),
-		TranscriptPath:       defaultNull(p.TranscriptPath),
-		PaneID:               defaultNull(p.PaneID),
+		SessionID:      ev.SessionID,
+		Cwd:            defaultNull(p.Cwd),
+		TranscriptPath: defaultNull(p.TranscriptPath),
 		// A freshly-started Claude session is showing its prompt and
 		// waiting for the user to type the first message. Nothing is
 		// being processed yet, so "idle" is the truthful state. The
