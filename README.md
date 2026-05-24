@@ -81,8 +81,8 @@ There are two ways to get the binary onto your `PATH`. After either one, run `cc
 # Option A: build from source
 go install github.com/elesiann/cc-cockpit/cmd/cc-cockpit@latest
 
-# Option B: download a release binary
-curl -L https://github.com/elesiann/cc-cockpit/releases/download/v0.3.0/cc-cockpit_0.3.0_linux_amd64.tar.gz \
+# Option B: download a release binary (linux/amd64; see Releases for other platforms)
+curl -L https://github.com/elesiann/cc-cockpit/releases/latest/download/cc-cockpit_linux_amd64.tar.gz \
   | tar -xz -C ~/.local/bin/ cc-cockpit
 
 # Then install hooks
@@ -93,6 +93,8 @@ cc-cockpit install
 
 Useful flags: `--bin-dir DIR`, `--settings FILE`, `--no-bin`, `--no-hooks`.
 
+To remove everything cc-cockpit installed, run `cc-cockpit uninstall` (see [Uninstall](#uninstall)).
+
 The `Notification` hook uses `matcher: "idle_prompt|permission_prompt"`, which is the signal that Claude is waiting on you.
 
 ---
@@ -100,10 +102,13 @@ The `Notification` hook uses `matcher: "idle_prompt|permission_prompt"`, which i
 ## Watch Mode
 
 ```bash
-cc-cockpit watch
+cc-cockpit watch                 # every workspace
+cc-cockpit watch --ws api,web    # only these workspaces
 ```
 
-`watch` opens a read-only dashboard in the current terminal. It scans all state dirs under `~/.local/state/cc-cockpit/*/events.jsonl` or `$XDG_STATE_HOME/cc-cockpit/*/events.jsonl`, then renders one row per non-ended session.
+`watch` opens a read-only dashboard in the current terminal. It scans all state dirs under `~/.local/state/cc-cockpit/*/events.jsonl` or `$XDG_STATE_HOME/cc-cockpit/*/events.jsonl`, then renders one row per non-ended session. The `--ws` flag accepts a comma-separated list (or repeated `--ws=<name>`) and restricts the view to those workspace names — useful when one project is noisy and you want to focus on another.
+
+The first time you run `watch` on a fresh machine you'll see an `(install) cc-cockpit install in another terminal` hint instead of an empty table — once hooks are installed and you start `claude`, the first row appears within one tick.
 
 Sessions are routed by cwd:
 
@@ -143,11 +148,12 @@ If you skip `init`, sessions still show up under `_global`.
 | Command | Use |
 |---|---|
 | `cc-cockpit install [--bin-dir DIR] [--settings FILE] [--no-bin] [--no-hooks]` | Symlink the binary onto `PATH` and merge Claude Code hooks. |
+| `cc-cockpit uninstall [--bin-dir DIR] [--settings FILE] [--no-bin] [--no-hooks]` | Remove cc-cockpit hook entries from `settings.json` and the PATH symlink. Idempotent. |
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create optional `.cc-cockpit/workspace.json` labels. |
-| `cc-cockpit doctor` | Check binary, Claude, hooks, and optional workspace config. |
-| `cc-cockpit watch` | Aggregate every active Claude session in the current terminal. |
+| `cc-cockpit doctor` | Check binary, Claude, hooks (including stale binary paths), and optional workspace config. |
+| `cc-cockpit watch [--ws X,Y]` | Aggregate every active Claude session in the current terminal. `--ws` restricts to selected workspace name(s). |
 | `cc-cockpit end <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for matching non-ended sessions. |
-| `cc-cockpit end all-non-ended --yes` | Mark every currently non-ended session as ended in dashboard state. |
+| `cc-cockpit end all-non-ended --yes` | Mark every currently non-ended session as ended in dashboard state. Always requires `--yes`. |
 | `cc-cockpit reap [--older-than DUR] [--dry-run] [--yes]` | Mark sessions older than `DUR` as ended. Default: `1h`. |
 | `cc-cockpit reduce` | Read `events.jsonl` on stdin and print reduced state JSON. |
 | `cc-cockpit --version` | Print version. |
@@ -179,17 +185,27 @@ If you skip `init`, sessions still show up under `_global`.
 
 ---
 
-## Cleanup
+## Uninstall
 
 ```bash
-cc-cockpit end all-non-ended --yes
-rm -rf ~/.local/state/cc-cockpit
+cc-cockpit uninstall
 ```
 
-If hooks should be removed entirely, edit `~/.claude/settings.json` and remove commands containing `cc-cockpit hook`.
+This removes only cc-cockpit's footprint:
+
+- Hook entries that carry a `cc-cockpit hook <Event>` command, from `~/.claude/settings.json`. Every other tool's hooks and every top-level key (`theme`, `permissions`, …) are preserved. A timestamped backup is written next to the settings file before changes.
+- The `~/.local/bin/cc-cockpit` symlink (or `--bin-dir <DIR>/cc-cockpit`). Refuses to delete a regular file there — that might be a manually-built binary, not a symlink cc-cockpit owns.
+
+Per-workspace event logs under `~/.local/state/cc-cockpit/` (or `$XDG_STATE_HOME/cc-cockpit/`) are intentionally left in place. To clear them too:
+
+```bash
+rm -rf ~/.local/state/cc-cockpit   # or $XDG_STATE_HOME/cc-cockpit
+```
+
+`uninstall` accepts the same flags as `install`: `--bin-dir`, `--settings`, `--no-bin`, `--no-hooks`. Running it twice is a clean no-op.
 
 ---
 
 ## Project Status
 
-Early-stage, single-author project. If you try it and it breaks, open an issue with the event log (`events.jsonl`) attached. PRs welcome; open a discussion issue first so we can align on scope.
+Stable, single-author project. If you try it and it breaks, open an issue with the event log (`events.jsonl`) attached. PRs welcome; open a discussion issue first so we can align on scope.
