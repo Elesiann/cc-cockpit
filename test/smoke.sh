@@ -238,6 +238,23 @@ else
   fail "doctor should pass without workspace: rc=$rc out='$out'"
 fi
 
+# Doctor must flag a stale hook binary path. Plant a settings.json whose
+# hook commands explicitly point at a copied binary in $STALE_DIR; then run
+# doctor with the build's $BIN. The two paths differ → stale should fire.
+STALE_DIR="$SANDBOX/stale"
+mkdir -p "$STALE_DIR"
+cp "$BIN" "$STALE_DIR/cc-cockpit"
+STALE_SETTINGS="$STALE_DIR/settings.json"
+echo '{}' > "$STALE_SETTINGS"
+"$STALE_DIR/cc-cockpit" install --no-bin --bin-dir "$STALE_DIR" --settings "$STALE_SETTINGS" >/dev/null
+out="$(CLAUDE_SETTINGS_PATH="$STALE_SETTINGS" "$BIN" doctor 2>&1)"
+rc=$?
+if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'hooks point at' && echo "$out" | grep -q "$STALE_DIR/cc-cockpit"; then
+  pass 'doctor flags stale hook binary path'
+else
+  fail "doctor stale-hook check failed: rc=$rc out='$out'"
+fi
+
 # =============================================================
 echo '[5] reducer tolerates malformed events'
 # =============================================================

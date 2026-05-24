@@ -436,6 +436,58 @@ func TestUninstallBin_RefusesRegularFile(t *testing.T) {
 	}
 }
 
+func TestInstalledHookBinaries_ReturnsDistinctPathsFromAllEvents(t *testing.T) {
+	merged, err := MergeHooks(nil, "/some/where/cc-cockpit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bins := InstalledHookBinaries(merged)
+	if len(bins) != 1 {
+		t.Fatalf("expected one distinct binary, got %d: %v", len(bins), bins)
+	}
+	if bins[0] != "/some/where/cc-cockpit" {
+		t.Errorf("binary path: got %q, want /some/where/cc-cockpit", bins[0])
+	}
+}
+
+func TestInstalledHookBinaries_HandlesQuotedPathsWithSpaces(t *testing.T) {
+	merged, err := MergeHooks(nil, "/path with spaces/cc-cockpit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bins := InstalledHookBinaries(merged)
+	if len(bins) != 1 || bins[0] != "/path with spaces/cc-cockpit" {
+		t.Errorf("got %v, want one entry with /path with spaces/cc-cockpit", bins)
+	}
+}
+
+func TestInstalledHookBinaries_MultiplePathsAreAllReturned(t *testing.T) {
+	// Hand-craft settings where two events point at different binaries (e.g.
+	// a partially-completed reinstall). Doctor needs to see both to flag the
+	// inconsistency.
+	settings := `{"hooks":{
+		"SessionStart":[{"hooks":[{"type":"command","command":"/old/cc-cockpit hook SessionStart"}]}],
+		"Stop":[{"hooks":[{"type":"command","command":"/new/cc-cockpit hook Stop"}]}]
+	}}`
+	bins := InstalledHookBinaries([]byte(settings))
+	if len(bins) != 2 {
+		t.Fatalf("expected 2 binaries, got %d: %v", len(bins), bins)
+	}
+	got := map[string]bool{bins[0]: true, bins[1]: true}
+	if !got["/old/cc-cockpit"] || !got["/new/cc-cockpit"] {
+		t.Errorf("missing one of /old, /new: %v", bins)
+	}
+}
+
+func TestInstalledHookBinaries_EmptyOrInvalid(t *testing.T) {
+	for _, in := range [][]byte{nil, {}, []byte("   "), []byte("not json")} {
+		bins := InstalledHookBinaries(in)
+		if bins != nil {
+			t.Errorf("input %q: got %v, want nil", in, bins)
+		}
+	}
+}
+
 func TestInstallBin_PreservesExistingTargetWhenReplacementFails(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "cc-cockpit")

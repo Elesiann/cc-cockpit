@@ -202,6 +202,23 @@ func runDoctor(args []string) int {
 			failFix("cc-cockpit install (rewrites the hooks block)", "Claude settings invalid: %v", err)
 		} else if hooksOK {
 			ok("Claude hooks installed and executable")
+			// Stale-install check: the hook commands point at a specific
+			// binary path. After `go install`-ing to a different GOPATH,
+			// moving the symlink, or rebuilding to a new location, the
+			// settings can keep working (the old binary still exists) but
+			// run a different — often older — version than what's on PATH.
+			// This is a silent footgun. Flag it.
+			running, _ := resolveSelfPath()
+			for _, bin := range install.InstalledHookBinaries(settingsRaw) {
+				resolved, err := filepath.EvalSymlinks(bin)
+				if err != nil {
+					resolved = bin
+				}
+				if running != "" && resolved != running {
+					failFix("cc-cockpit install (re-points hooks at this binary)",
+						"hooks point at %s, but this binary is %s", bin, running)
+				}
+			}
 		} else {
 			failFix("cc-cockpit install", "Claude hooks missing, stale, or pointing at a non-executable cc-cockpit")
 		}

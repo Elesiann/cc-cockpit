@@ -228,6 +228,45 @@ func cockpitHookEntryUsable(e any) bool {
 	return false
 }
 
+// InstalledHookBinaries returns every distinct binary path embedded in
+// cc-cockpit hook commands found in the settings document. Used by doctor
+// to detect stale installs where settings.json still points at an old or
+// moved binary (a common state after `go install` to a new GOPATH, after
+// moving the symlink target, or after replacing the binary by hand).
+//
+// Returns an empty slice for invalid JSON or for settings with no cc-cockpit
+// hooks — neither case is a "stale" situation; doctor's other checks cover
+// the missing-hook path.
+func InstalledHookBinaries(settingsData []byte) []string {
+	if len(bytes.TrimSpace(settingsData)) == 0 {
+		return nil
+	}
+	var top struct {
+		Hooks map[string][]any `json:"hooks"`
+	}
+	if err := json.Unmarshal(settingsData, &top); err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	for _, entries := range top.Hooks {
+		for _, e := range entries {
+			for _, cmd := range cockpitHookCommands(e) {
+				fields, ok := splitHookCommandFields(cmd)
+				if !ok || len(fields) == 0 {
+					continue
+				}
+				bin := fields[0]
+				if !seen[bin] {
+					seen[bin] = true
+					out = append(out, bin)
+				}
+			}
+		}
+	}
+	return out
+}
+
 func hookCommandBinaryUsable(cmd string) bool {
 	fields, ok := splitHookCommandFields(cmd)
 	if !ok || len(fields) == 0 {
