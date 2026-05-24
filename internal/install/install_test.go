@@ -85,6 +85,40 @@ func TestMergeHooks_ReplacesExistingCockpitHook(t *testing.T) {
 	}
 }
 
+func TestMergeHooks_ReplacesQuotedExistingCockpitHook(t *testing.T) {
+	existing := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"'/old dir/cc-cockpit' hook SessionStart"}]}]}}`)
+	out, err := MergeHooks(existing, "/new/cc-cockpit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "/old dir/cc-cockpit") {
+		t.Errorf("old quoted cc-cockpit entry not replaced: %s", string(out))
+	}
+}
+
+func TestMergeHooks_QuotesBinPathWithSpaces(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "bin dir")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "cc-cockpit")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := MergeHooks(nil, bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "'"+bin+"' hook SessionStart") {
+		t.Fatalf("expected quoted hook command for spaced path, got:\n%s", out)
+	}
+	ok, err := HooksInstalled(out)
+	if err != nil || !ok {
+		t.Fatalf("HooksInstalled should accept quoted hook command: ok=%v err=%v", ok, err)
+	}
+}
+
 func TestMergeHooks_PreservesTopLevelKeys(t *testing.T) {
 	existing := []byte(`{"theme":"dark","permissions":{"allow":["Bash"]},"hooks":{}}`)
 	out, _ := MergeHooks(existing, "/bin/cc-cockpit")

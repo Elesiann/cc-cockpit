@@ -54,7 +54,7 @@ func MergeHooks(existing []byte, binPath string) ([]byte, error) {
 
 		entry := map[string]any{
 			"hooks": []any{
-				map[string]any{"type": "command", "command": binPath + " hook " + ev},
+				map[string]any{"type": "command", "command": hookCommand(binPath, ev)},
 			},
 		}
 		if ev == state.EventNotification {
@@ -93,11 +93,33 @@ func cockpitHookCommands(e any) []string {
 	for _, h := range hooks {
 		hMap, _ := h.(map[string]any)
 		cmd, _ := hMap["command"].(string)
-		if strings.Contains(cmd, "cc-cockpit hook ") {
+		if isCockpitHookCommand(cmd) {
 			cmds = append(cmds, cmd)
 		}
 	}
 	return cmds
+}
+
+func hookCommand(binPath, event string) string {
+	return shellQuoteArg(binPath) + " hook " + event
+}
+
+func shellQuoteArg(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(s, " \t\n'\"\\$`!&|;()<>{}[]*?") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func isCockpitHookCommand(cmd string) bool {
+	fields, ok := splitHookCommandFields(cmd)
+	if !ok || len(fields) < 3 {
+		return false
+	}
+	return filepath.Base(fields[0]) == "cc-cockpit" && fields[1] == "hook" && fields[2] != ""
 }
 
 // EntryHasMatcher reports whether a hook entry uses the given matcher AND
@@ -194,8 +216,8 @@ func cockpitHookEntryUsable(e any) bool {
 }
 
 func hookCommandBinaryUsable(cmd string) bool {
-	fields := strings.Fields(cmd)
-	if len(fields) == 0 {
+	fields, ok := splitHookCommandFields(cmd)
+	if !ok || len(fields) == 0 {
 		return false
 	}
 	bin := fields[0]
@@ -205,6 +227,65 @@ func hookCommandBinaryUsable(cmd string) bool {
 	}
 	_, err := exec.LookPath(bin)
 	return err == nil
+}
+
+func splitHookCommandFields(s string) ([]string, bool) {
+	var fields []string
+	var b strings.Builder
+	var quote rune
+	escaped := false
+	inField := false
+
+	for _, r := range s {
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			inField = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				inField = true
+				continue
+			}
+			if quote == '"' && r == '\\' {
+				escaped = true
+				continue
+			}
+			b.WriteRune(r)
+			inField = true
+			continue
+		}
+
+		switch r {
+		case '\'', '"':
+			quote = r
+			inField = true
+		case '\\':
+			escaped = true
+			inField = true
+		case ' ', '\t', '\n', '\r':
+			if inField {
+				fields = append(fields, b.String())
+				b.Reset()
+				inField = false
+			}
+		default:
+			b.WriteRune(r)
+			inField = true
+		}
+	}
+	if escaped {
+		b.WriteRune('\\')
+	}
+	if quote != 0 {
+		return nil, false
+	}
+	if inField {
+		fields = append(fields, b.String())
+	}
+	return fields, true
 }
 
 // EnsureHooks installs cc-cockpit's Claude Code hooks if HooksInstalled
