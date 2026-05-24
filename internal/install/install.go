@@ -30,6 +30,10 @@ var Events = []string{
 // MergeHooks idempotently installs cc-cockpit hooks into a Claude settings
 // document. Entries whose .hooks[].command contains "cc-cockpit hook " are
 // replaced; everything else is preserved. Empty input is treated as {}.
+//
+// Returns an error if the document is shaped in a way that doesn't match the
+// Claude Code schema (hooks not an object, or a per-event entry not an array).
+// Silently coercing those would destroy user data the merger can't represent.
 func MergeHooks(existing []byte, binPath string) ([]byte, error) {
 	top := map[string]any{}
 	if len(bytes.TrimSpace(existing)) > 0 {
@@ -38,13 +42,26 @@ func MergeHooks(existing []byte, binPath string) ([]byte, error) {
 		}
 	}
 
-	hooksAny, _ := top["hooks"].(map[string]any)
-	if hooksAny == nil {
+	var hooksAny map[string]any
+	if existingHooks, present := top["hooks"]; present {
+		m, ok := existingHooks.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("settings.hooks must be a JSON object, got %T — refusing to overwrite. Fix the file or remove the .hooks key", existingHooks)
+		}
+		hooksAny = m
+	} else {
 		hooksAny = map[string]any{}
 	}
 
 	for _, ev := range Events {
-		existingEntries, _ := hooksAny[ev].([]any)
+		var existingEntries []any
+		if raw, present := hooksAny[ev]; present {
+			arr, ok := raw.([]any)
+			if !ok {
+				return nil, fmt.Errorf("settings.hooks.%s must be a JSON array, got %T — refusing to overwrite. Fix the file or remove the .hooks.%s key", ev, raw, ev)
+			}
+			existingEntries = arr
+		}
 		var kept []any
 		for _, e := range existingEntries {
 			if !entryHasCockpitHook(e) {

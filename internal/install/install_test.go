@@ -138,6 +138,40 @@ func TestMergeHooks_RejectsInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestMergeHooks_RefusesNonObjectHooksField(t *testing.T) {
+	// User's settings.json had `hooks` as an array (or some other non-object
+	// shape). Previously we silently dropped that value and wrote our object,
+	// destroying user data. Now: return an error so the user can fix it.
+	cases := []string{
+		`{"hooks":["array","not","object"]}`,
+		`{"hooks":"a string"}`,
+		`{"hooks":42}`,
+	}
+	for _, input := range cases {
+		out, err := MergeHooks([]byte(input), "/bin/cc-cockpit")
+		if err == nil {
+			t.Errorf("input %q: expected error, got merged output:\n%s", input, out)
+			continue
+		}
+		if !strings.Contains(err.Error(), "settings.hooks must be a JSON object") {
+			t.Errorf("input %q: error should explain the constraint, got: %v", input, err)
+		}
+	}
+}
+
+func TestMergeHooks_RefusesNonArrayEventEntry(t *testing.T) {
+	// settings.hooks is an object (valid) but a specific event is bound to a
+	// non-array value. The previous code silently overwrote it.
+	input := `{"hooks":{"SessionStart":"not an array"}}`
+	out, err := MergeHooks([]byte(input), "/bin/cc-cockpit")
+	if err == nil {
+		t.Fatalf("expected error, got merged output:\n%s", out)
+	}
+	if !strings.Contains(err.Error(), "SessionStart") {
+		t.Errorf("error should name the offending event, got: %v", err)
+	}
+}
+
 func TestEvents_IncludesBothToolUseHooks(t *testing.T) {
 	// Anchor: cc-cockpit's granular state machine (running / processing)
 	// depends on both PreToolUse and PostToolUse being installed in the
