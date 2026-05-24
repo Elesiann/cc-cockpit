@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -160,26 +161,44 @@ func computeBell(data []byte, lastBellSeq int64) bellInfo {
 	return info
 }
 
-// pickAttentionLabels returns repo/task for the first waiting_input session
-// in st. Used to label the desktop notification. Best-effort: when nothing
-// matches, returns ("", "") and the caller falls back to a generic message.
-// metas carries Claude Code's /rename values so notifications match what the
-// user sees in the dashboard.
+// pickAttentionLabels returns repo/task for one waiting_input session in st.
+// When several sessions need attention at once, the most-recently-active wins
+// (sid asc as a tiebreaker so the choice is stable). Without that ordering,
+// Go's randomized map iteration could flip the notification label between
+// otherwise-identical ticks. Best-effort: returns ("", "") when no session
+// is waiting and the caller falls back to a generic message. metas carries
+// Claude Code's /rename values so notifications match what the user sees in
+// the dashboard.
 func pickAttentionLabels(st state.State, metas map[string]SessionMeta) (repo, task string) {
+	type waitingSession struct {
+		sid  string
+		sess *state.Session
+	}
+	var waiting []waitingSession
 	for sid, s := range st.Sessions {
 		if s.Status == state.StatusWaitingInput {
-			repo = sessionRepoLabel(s)
-			task = sessionTaskLabel(s, metas[sid])
-			if task == "—" {
-				task = ""
-			}
-			if repo == "—" {
-				repo = ""
-			}
-			return repo, task
+			waiting = append(waiting, waitingSession{sid, s})
 		}
 	}
-	return "", ""
+	if len(waiting) == 0 {
+		return "", ""
+	}
+	sort.Slice(waiting, func(i, j int) bool {
+		if waiting[i].sess.LastActivity != waiting[j].sess.LastActivity {
+			return waiting[i].sess.LastActivity > waiting[j].sess.LastActivity
+		}
+		return waiting[i].sid < waiting[j].sid
+	})
+	w := waiting[0]
+	repo = sessionRepoLabel(w.sess)
+	task = sessionTaskLabel(w.sess, metas[w.sid])
+	if repo == "—" {
+		repo = ""
+	}
+	if task == "—" {
+		task = ""
+	}
+	return repo, task
 }
 
 func buildNotifyMessage(count int, repo, task string) string {
