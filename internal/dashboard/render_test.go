@@ -353,10 +353,31 @@ func TestRenderMulti_IncludesWSColumn(t *testing.T) {
 	}
 }
 
-func TestRenderMulti_NoSessions(t *testing.T) {
+func TestRenderMulti_NoWorkspaces_ShowsFirstTimeInstallHint(t *testing.T) {
+	// nil samples means we didn't find any state dirs at all — typically a
+	// brand-new install where Claude Code hooks haven't been wired up. The
+	// hint must mention `cc-cockpit install` so the user knows the next
+	// step (without making the running watch command itself feel broken).
 	frame := RenderMulti(nil, "watch · 0 workspace(s)", time.Now(), nil, nil, nil)
+	if !strings.Contains(frame, "cc-cockpit install") {
+		t.Errorf("expected first-time install hint, got:\n%s", frame)
+	}
+	if strings.Contains(frame, "no active sessions across any workspace") {
+		t.Errorf("first-time message should differ from steady-state empty message:\n%s", frame)
+	}
+}
+
+func TestRenderMulti_WorkspacesPresentButNoSessions_ShowsSteadyStateMessage(t *testing.T) {
+	// At least one state dir exists (Claude has been observed before) but
+	// nothing is live right now. Keep the original message — it would be
+	// misleading to claim hooks aren't installed.
+	samples := []TaggedState{{Name: "ws-1", State: state.State{Sessions: map[string]*state.Session{}}}}
+	frame := RenderMulti(samples, "watch · 1 workspace(s)", time.Now(), nil, nil, nil)
 	if !strings.Contains(frame, "no active sessions across any workspace") {
-		t.Errorf("expected friendly empty message, got:\n%s", frame)
+		t.Errorf("expected steady-state empty message, got:\n%s", frame)
+	}
+	if strings.Contains(frame, "cc-cockpit install") {
+		t.Errorf("install hint must NOT appear when workspaces exist:\n%s", frame)
 	}
 }
 

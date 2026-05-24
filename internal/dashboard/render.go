@@ -124,6 +124,16 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 		return active[i].sid < active[j].sid
 	})
 	if len(active) == 0 {
+		// Distinguish "hooks installed, just no sessions yet" from "no state
+		// dirs at all" (the latter usually means hooks haven't been installed,
+		// so the user gets no events and never sees anything appear). The
+		// first-time hint avoids the "I ran watch and it's empty forever"
+		// failure mode.
+		if len(samples) == 0 {
+			return "─── active (0) ───\n" +
+				"  (no Claude sessions seen yet — if hooks aren't installed,\n" +
+				"   run `cc-cockpit install` in another terminal, then start `claude`.)"
+		}
 		return "─── active (0) ───\n  (no active sessions across any workspace)"
 	}
 
