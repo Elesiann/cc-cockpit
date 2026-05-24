@@ -83,6 +83,20 @@ if ! echo "$help" | grep -Eq '^  (open|close|start|start-fleet|dashboard)([[:spa
 else
   fail "help still mentions removed commands: $help"
 fi
+out="$("$BIN" watch --ws 2>&1)"
+rc=$?
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q '\-\-ws requires a value'; then
+  pass 'watch --ws without value errors clearly'
+else
+  fail "watch --ws bare flag: rc=$rc out='$out'"
+fi
+out="$("$BIN" watch --bogus 2>&1)"
+rc=$?
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'unexpected argument'; then
+  pass 'watch rejects unknown flags'
+else
+  fail "watch unknown flag: rc=$rc out='$out'"
+fi
 
 # =============================================================
 echo '[2] hook routes global and workspace sessions silently'

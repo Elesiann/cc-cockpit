@@ -66,7 +66,7 @@ Subcommands:
   install             install the binary on PATH and Claude Code hooks
   init                create optional .cc-cockpit/workspace.json labels
   doctor              check install + optional workspace health
-  watch               headless dashboard: aggregate every workspace's sessions in any terminal
+  watch [--ws X,Y]    headless dashboard: aggregate every workspace's sessions; --ws scopes to selected workspace name(s)
   end <prefix>            end a session in dashboard state; works from any terminal (scans all workspaces)
   reap [--older-than DUR] sweep all workspaces, end every non-ended session whose last activity is older than DUR (default: 1h)
   hook <Event>        internal: ingest a Claude Code hook payload
@@ -495,17 +495,45 @@ func appendSyntheticEnd(stateHome, sid, reason string) error {
 
 // runWatch renders an aggregate of every workspace under the cc-cockpit state
 // root in the current terminal. Read-only; does not launch or manage Claude
-// processes. Exits on SIGINT/SIGTERM.
+// processes. Exits on SIGINT/SIGTERM. --ws scopes the view to one or more
+// workspace names (comma-separated or repeated).
 func runWatch(args []string) int {
-	if len(args) > 0 {
-		die("watch", "unexpected arguments: %v", args)
+	var allowed []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--ws":
+			if i+1 >= len(args) {
+				die("watch", "--ws requires a value (e.g. --ws api,web)")
+			}
+			allowed = append(allowed, splitCSVNonEmpty(args[i+1])...)
+			i++
+		case strings.HasPrefix(a, "--ws="):
+			allowed = append(allowed, splitCSVNonEmpty(strings.TrimPrefix(a, "--ws="))...)
+		default:
+			die("watch", "unexpected argument %q (only --ws is supported)", a)
+		}
 	}
 	root := dashboard.DefaultStateRoot(homeDir(), os.Getenv)
-	src := dashboard.AggregateSource{StateRoot: root}
+	src := dashboard.AggregateSource{StateRoot: root, AllowedWorkspaces: allowed}
 	if err := dashboard.Run(src); err != nil {
 		die("watch", err.Error())
 	}
 	return 0
+}
+
+// splitCSVNonEmpty trims whitespace and drops empty fields. Used so that
+// --ws=api,,web stays {api, web} instead of inserting a "" workspace name
+// that could never match.
+func splitCSVNonEmpty(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ---------- reduce ----------

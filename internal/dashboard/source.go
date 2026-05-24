@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"golang.org/x/sys/unix"
 
@@ -39,9 +40,12 @@ type Source interface {
 
 // AggregateSource is `cc-cockpit watch`'s view: every state dir under the
 // cc-cockpit state root that has an events.jsonl. Per-source Reduce keeps each
-// workspace's seq monotonicity intact instead of interleaving them.
+// workspace's seq monotonicity intact instead of interleaving them. When
+// AllowedWorkspaces is non-empty, only those workspace names are included
+// (matched against the basename of each state dir).
 type AggregateSource struct {
-	StateRoot string // e.g. ~/.local/state/cc-cockpit
+	StateRoot         string // e.g. ~/.local/state/cc-cockpit
+	AllowedWorkspaces []string
 }
 
 func (a AggregateSource) Sample() ([]TaggedState, error) {
@@ -54,10 +58,21 @@ func (a AggregateSource) Sample() ([]TaggedState, error) {
 	// lexicographic but be explicit.
 	sort.Strings(matches)
 
+	var allowed map[string]bool
+	if len(a.AllowedWorkspaces) > 0 {
+		allowed = make(map[string]bool, len(a.AllowedWorkspaces))
+		for _, name := range a.AllowedWorkspaces {
+			allowed[name] = true
+		}
+	}
+
 	out := make([]TaggedState, 0, len(matches))
 	for _, evPath := range matches {
 		stateHome := filepath.Dir(evPath)
 		name := filepath.Base(stateHome)
+		if allowed != nil && !allowed[name] {
+			continue
+		}
 		raw, err := snapshotBytes(stateHome)
 		if err != nil {
 			// One unreadable workspace shouldn't blank the whole watch
@@ -76,6 +91,9 @@ func (a AggregateSource) Sample() ([]TaggedState, error) {
 }
 
 func (a AggregateSource) HeaderName(samples []TaggedState) string {
+	if len(a.AllowedWorkspaces) > 0 {
+		return fmt.Sprintf("watch · %d/%s", len(samples), strings.Join(a.AllowedWorkspaces, ","))
+	}
 	return fmt.Sprintf("watch · %d workspace(s)", len(samples))
 }
 

@@ -87,6 +87,56 @@ func TestAggregateSource_HeaderName(t *testing.T) {
 	}
 }
 
+func TestAggregateSource_HeaderName_WithFilter(t *testing.T) {
+	a := AggregateSource{AllowedWorkspaces: []string{"api", "web"}}
+	got := a.HeaderName(make([]TaggedState, 2))
+	if got != "watch · 2/api,web" {
+		t.Errorf("header: got %q", got)
+	}
+}
+
+func TestAggregateSource_Sample_AppliesAllowList(t *testing.T) {
+	root := t.TempDir()
+	writeEvents(t, filepath.Join(root, "alpha"),
+		`{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"sid-a","payload":{"cwd":"/r/a"}}`,
+	)
+	writeEvents(t, filepath.Join(root, "beta"),
+		`{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"sid-b","payload":{"cwd":"/r/b"}}`,
+	)
+	writeEvents(t, filepath.Join(root, "gamma"),
+		`{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"sid-g","payload":{"cwd":"/r/g"}}`,
+	)
+
+	src := AggregateSource{StateRoot: root, AllowedWorkspaces: []string{"alpha", "gamma"}}
+	samples, err := src.Sample()
+	if err != nil {
+		t.Fatalf("sample: %v", err)
+	}
+	if len(samples) != 2 {
+		t.Fatalf("samples len: got %d want 2 (got %+v)", len(samples), samples)
+	}
+	names := []string{samples[0].Name, samples[1].Name}
+	if !(names[0] == "alpha" && names[1] == "gamma") {
+		t.Errorf("expected alpha,gamma (beta filtered out) got %v", names)
+	}
+}
+
+func TestAggregateSource_Sample_EmptyAllowList_IncludesEverything(t *testing.T) {
+	// Defensive: AllowedWorkspaces == nil means no filtering (the default).
+	root := t.TempDir()
+	writeEvents(t, filepath.Join(root, "alpha"),
+		`{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"sid-a","payload":{}}`,
+	)
+	src := AggregateSource{StateRoot: root}
+	samples, err := src.Sample()
+	if err != nil {
+		t.Fatalf("sample: %v", err)
+	}
+	if len(samples) != 1 {
+		t.Fatalf("expected 1 sample, got %d", len(samples))
+	}
+}
+
 func TestDefaultStateRoot_PrefersXDG(t *testing.T) {
 	got := DefaultStateRoot("/home/u", func(k string) string {
 		if k == "XDG_STATE_HOME" {
