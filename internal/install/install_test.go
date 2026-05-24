@@ -231,6 +231,211 @@ func TestHooksInstalled_DeadCockpitPathReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestRemoveHooks_StripsCockpitOnlyPreservesEverythingElse(t *testing.T) {
+	// Start from a settings file that mixes our hooks with user hooks.
+	bin := "/bin/cc-cockpit"
+	merged, err := MergeHooks([]byte(`{"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/usr/bin/echo keep"}]}]}}`), bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, removed, err := RemoveHooks(merged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != len(Events) {
+		t.Errorf("removed=%d, want %d (one per event)", removed, len(Events))
+	}
+	var top map[string]any
+	if err := json.Unmarshal(out, &top); err != nil {
+		t.Fatal(err)
+	}
+	if top["theme"] != "dark" {
+		t.Errorf("top-level 'theme' lost: got %v", top["theme"])
+	}
+	hooks, _ := top["hooks"].(map[string]any)
+	stop, _ := hooks["Stop"].([]any)
+	if len(stop) != 1 {
+		t.Fatalf("user's Stop hook lost, got %d entries", len(stop))
+	}
+	hookList := stop[0].(map[string]any)["hooks"].([]any)
+	cmd, _ := hookList[0].(map[string]any)["command"].(string)
+	if !strings.Contains(cmd, "echo keep") {
+		t.Errorf("user's 'echo keep' was removed during uninstall: %s", cmd)
+	}
+	// Every other cc-cockpit-only event should be gone.
+	for _, ev := range Events {
+		if ev == "Stop" {
+			continue
+		}
+		if _, present := hooks[ev]; present {
+			t.Errorf("event %s should be removed entirely, still present: %v", ev, hooks[ev])
+		}
+	}
+}
+
+func TestRemoveHooks_NoOpWhenNoCockpitHooks(t *testing.T) {
+	input := []byte(`{"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/usr/bin/echo keep"}]}]}}`)
+	out, removed, err := RemoveHooks(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Errorf("removed=%d, want 0", removed)
+	}
+	// Structural equality: the user's keys survive the round-trip even
+	// though the JSON may be reformatted. UninstallHooks gates on
+	// removed > 0 before writing, so reformatting in the no-op path is
+	// invisible to disk.
+	var got, want map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(input, &want); err != nil {
+		t.Fatal(err)
+	}
+	if got["theme"] != want["theme"] {
+		t.Errorf("theme lost: got %v want %v", got["theme"], want["theme"])
+	}
+	gotStop := got["hooks"].(map[string]any)["Stop"]
+	wantStop := want["hooks"].(map[string]any)["Stop"]
+	gotJSON, _ := json.Marshal(gotStop)
+	wantJSON, _ := json.Marshal(wantStop)
+	if string(gotJSON) != string(wantJSON) {
+		t.Errorf("Stop hook changed: got %s want %s", gotJSON, wantJSON)
+	}
+}
+
+func TestRemoveHooks_DropsHooksKeyWhenEmptyAfterRemoval(t *testing.T) {
+	merged, _ := MergeHooks(nil, "/bin/cc-cockpit")
+	out, _, err := RemoveHooks(merged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(out, &top); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := top["hooks"]; present {
+		t.Errorf(".hooks should be dropped when no events remain, got %v", top["hooks"])
+	}
+}
+
+func TestRemoveHooks_EmptyInputIsNoOp(t *testing.T) {
+	for _, in := range [][]byte{nil, {}, []byte("   \n\t")} {
+		out, removed, err := RemoveHooks(in)
+		if err != nil {
+			t.Errorf("empty input %q: unexpected err %v", in, err)
+		}
+		if removed != 0 {
+			t.Errorf("empty input %q: removed=%d, want 0", in, removed)
+		}
+		if string(out) != string(in) {
+			t.Errorf("empty input %q: got %q, want unchanged", in, out)
+		}
+	}
+}
+
+func TestRemoveHooks_RefusesMalformedSchema(t *testing.T) {
+	_, _, err := RemoveHooks([]byte(`{"hooks":"not an object"}`))
+	if err == nil {
+		t.Errorf("expected error for non-object hooks")
+	}
+}
+
+func TestUninstallHooks_RoundTripIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	// The hook-command recognizer requires basename == "cc-cockpit". Use a
+	// subdir to host the shim under that exact name without colliding with
+	// the symlink that InstallBin would create at dir/cc-cockpit.
+	binSubdir := filepath.Join(dir, "shim-dir")
+	if err := os.MkdirAll(binSubdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(binSubdir, "cc-cockpit")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(settings, []byte(`{"theme":"dark"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallHooks(settings, bin); err != nil {
+		t.Fatal(err)
+	}
+	// First uninstall removes everything we installed.
+	removed, err := UninstallHooks(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != len(Events) {
+		t.Errorf("first uninstall removed=%d, want %d", removed, len(Events))
+	}
+	// Second uninstall is a no-op.
+	removed2, err := UninstallHooks(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed2 != 0 {
+		t.Errorf("second uninstall removed=%d, want 0", removed2)
+	}
+	// User's top-level setting survives.
+	data, _ := os.ReadFile(settings)
+	var top map[string]any
+	json.Unmarshal(data, &top)
+	if top["theme"] != "dark" {
+		t.Errorf("user's theme lost: got %v", top["theme"])
+	}
+}
+
+func TestUninstallHooks_MissingFileIsNoOp(t *testing.T) {
+	removed, err := UninstallHooks(filepath.Join(t.TempDir(), "does-not-exist.json"))
+	if err != nil {
+		t.Errorf("missing file should be no-op, got err %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("removed=%d, want 0", removed)
+	}
+}
+
+func TestUninstallBin_RemovesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "cc-cockpit-real")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := InstallBin(dir, bin); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := UninstallBin(dir)
+	if err != nil || !removed {
+		t.Fatalf("UninstallBin: removed=%v err=%v", removed, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "cc-cockpit")); !os.IsNotExist(err) {
+		t.Errorf("symlink should be gone, got err=%v", err)
+	}
+	// Second uninstall is a no-op.
+	removed2, err := UninstallBin(dir)
+	if err != nil || removed2 {
+		t.Errorf("second UninstallBin: removed=%v err=%v (want false, nil)", removed2, err)
+	}
+}
+
+func TestUninstallBin_RefusesRegularFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "cc-cockpit")
+	// Regular file at the install path — not ours to delete.
+	if err := os.WriteFile(target, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := UninstallBin(dir)
+	if err == nil {
+		t.Errorf("UninstallBin should refuse regular files")
+	}
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Errorf("regular file should still exist, got err=%v", statErr)
+	}
+}
+
 func TestInstallBin_PreservesExistingTargetWhenReplacementFails(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "cc-cockpit")

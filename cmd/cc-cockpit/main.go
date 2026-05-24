@@ -51,6 +51,8 @@ func main() {
 		os.Exit(runReduce(args))
 	case "install", "setup":
 		os.Exit(runInstall(args))
+	case "uninstall":
+		os.Exit(runUninstall(args))
 	case "help", "--help", "-h":
 		usage()
 	default:
@@ -64,6 +66,7 @@ func usage() {
 
 Subcommands:
   install             install the binary on PATH and Claude Code hooks
+  uninstall           remove cc-cockpit hook entries and the PATH symlink
   init                create optional .cc-cockpit/workspace.json labels
   doctor              check install + optional workspace health
   watch [--ws X,Y]    headless dashboard: aggregate every workspace's sessions; --ws scopes to selected workspace name(s)
@@ -612,6 +615,81 @@ func runInstall(args []string) int {
 	}
 	fmt.Println("install: done")
 	return 0
+}
+
+// ---------- uninstall ----------
+
+// runUninstall removes cc-cockpit's footprint: hook entries in the Claude
+// settings file (preserving everything else) and the binary symlink. Refuses
+// to delete a regular file at the symlink path (it might be a manual install
+// the user installed deliberately; we'd rather flag it than guess).
+//
+// Default flags mirror install: --bin-dir / --settings / --no-bin / --no-hooks.
+// Idempotent: a second run is a no-op.
+func runUninstall(args []string) int {
+	binDir := envOrDefault("CC_COCKPIT_BIN_DIR", filepath.Join(homeDir(), ".local", "bin"))
+	settings := envOrDefault("CLAUDE_SETTINGS_PATH", filepath.Join(homeDir(), ".claude", "settings.json"))
+	doBin, doHooks := true, true
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--bin-dir":
+			if i+1 >= len(args) {
+				die("uninstall", "--bin-dir requires a value")
+			}
+			binDir = args[i+1]
+			i++
+		case "--settings":
+			if i+1 >= len(args) {
+				die("uninstall", "--settings requires a value")
+			}
+			settings = args[i+1]
+			i++
+		case "--no-bin":
+			doBin = false
+		case "--no-hooks":
+			doHooks = false
+		default:
+			die("uninstall", "unknown flag %q", args[i])
+		}
+	}
+
+	if doHooks {
+		removed, err := install.UninstallHooks(settings)
+		if err != nil {
+			die("uninstall", "%v", err)
+		}
+		if removed == 0 {
+			fmt.Printf("uninstall: no cc-cockpit hooks in %s\n", settings)
+		} else {
+			fmt.Printf("uninstall: removed %d cc-cockpit hook entr%s from %s\n", removed, plural(removed, "y", "ies"), settings)
+		}
+	}
+
+	if doBin {
+		removed, err := install.UninstallBin(binDir)
+		if err != nil {
+			die("uninstall", "%v", err)
+		}
+		target := filepath.Join(binDir, "cc-cockpit")
+		if removed {
+			fmt.Printf("uninstall: removed %s\n", target)
+		} else {
+			fmt.Printf("uninstall: no symlink at %s\n", target)
+		}
+	}
+
+	fmt.Println("uninstall: done")
+	fmt.Println("note: per-workspace event logs under the state root are kept.")
+	fmt.Println("      run `rm -rf ~/.local/state/cc-cockpit` (or $XDG_STATE_HOME/cc-cockpit) to clear them.")
+	return 0
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // ---------- helpers ----------

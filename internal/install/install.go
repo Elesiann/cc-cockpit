@@ -301,6 +301,125 @@ func splitHookCommandFields(s string) ([]string, bool) {
 	return fields, true
 }
 
+// RemoveHooks strips cc-cockpit's hook entries from a Claude settings
+// document, preserving everything else. An event whose entries list becomes
+// empty after removal is dropped from .hooks. .hooks itself is dropped when
+// no events remain. Returns the new bytes plus a count of removed entries
+// (0 means nothing changed; caller should skip writing).
+//
+// Errors mirror MergeHooks: malformed top-level JSON or non-object hooks /
+// non-array event entries refuse rather than coerce, so we never silently
+// destroy user data.
+func RemoveHooks(existing []byte) (out []byte, removed int, err error) {
+	if len(bytes.TrimSpace(existing)) == 0 {
+		return existing, 0, nil
+	}
+	top := map[string]any{}
+	if err := json.Unmarshal(existing, &top); err != nil {
+		return nil, 0, err
+	}
+	rawHooks, present := top["hooks"]
+	if !present {
+		return existing, 0, nil
+	}
+	hooks, ok := rawHooks.(map[string]any)
+	if !ok {
+		return nil, 0, fmt.Errorf("settings.hooks must be a JSON object, got %T — refusing to modify", rawHooks)
+	}
+
+	for ev, raw := range hooks {
+		entries, ok := raw.([]any)
+		if !ok {
+			return nil, 0, fmt.Errorf("settings.hooks.%s must be a JSON array, got %T — refusing to modify", ev, raw)
+		}
+		var kept []any
+		for _, e := range entries {
+			if entryHasCockpitHook(e) {
+				removed++
+				continue
+			}
+			kept = append(kept, e)
+		}
+		if len(kept) == 0 {
+			delete(hooks, ev)
+		} else {
+			hooks[ev] = kept
+		}
+	}
+	if len(hooks) == 0 {
+		delete(top, "hooks")
+	} else {
+		top["hooks"] = hooks
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(top); err != nil {
+		return nil, 0, err
+	}
+	return buf.Bytes(), removed, nil
+}
+
+// UninstallHooks removes cc-cockpit's hook entries from settingsPath. No-op
+// if the file is missing or contains no cc-cockpit hooks. Backs up the file
+// as .bak-<ts> before writing, matching InstallHooks. Returns the number of
+// removed entries.
+func UninstallHooks(settingsPath string) (int, error) {
+	existing, err := os.ReadFile(settingsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	merged, removed, err := RemoveHooks(existing)
+	if err != nil {
+		return 0, err
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+
+	ts := time.Now().Format("20060102-150405")
+	if err := os.WriteFile(settingsPath+".bak-"+ts, existing, 0o644); err != nil {
+		return 0, fmt.Errorf("backup: %w", err)
+	}
+	tmp := settingsPath + ".tmp"
+	if err := os.WriteFile(tmp, merged, 0o644); err != nil {
+		return 0, fmt.Errorf("write tmp: %w", err)
+	}
+	if err := os.Rename(tmp, settingsPath); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+// UninstallBin removes binDir/cc-cockpit if it's a symlink pointing into the
+// current binary lineage. Refuses to delete a regular file there (not ours
+// to remove). Returns true when it deleted something, false when nothing
+// needed deleting, and an error only on permission/IO failures.
+func UninstallBin(binDir string) (bool, error) {
+	target := filepath.Join(binDir, "cc-cockpit")
+	info, err := os.Lstat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		// Regular file (or directory). Not ours to remove — `go install` etc.
+		// could have written it. Surface the situation rather than guessing.
+		return false, fmt.Errorf("%s is not a symlink — refusing to delete (remove it manually if it's a stale install)", target)
+	}
+	if err := os.Remove(target); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // InstallBin symlinks binDir/cc-cockpit -> selfPath. No-op if the symlink
 // already points there; otherwise replaces whatever's there.
 func InstallBin(binDir, selfPath string) error {

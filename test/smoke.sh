@@ -65,6 +65,33 @@ session_start_count="$(jq '[.hooks.SessionStart[] | .hooks[]? | select(.command 
   && pass 'install is idempotent for cc-cockpit hooks' \
   || fail "install duplicated hooks: count=$session_start_count out='$out'"
 
+# uninstall round-trip: must remove every cc-cockpit hook and the symlink,
+# leave preserved Stop entry alone, leave the top-level theme key alone.
+UNINSTALL_SANDBOX="$SANDBOX/uninstall-test"
+mkdir -p "$UNINSTALL_SANDBOX/bin"
+cat > "$UNINSTALL_SANDBOX/settings.json" <<'EOF'
+{"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"/usr/bin/echo keep"}]}]}}
+EOF
+"$BIN" install --bin-dir "$UNINSTALL_SANDBOX/bin" --settings "$UNINSTALL_SANDBOX/settings.json" >/dev/null
+out="$("$BIN" uninstall --bin-dir "$UNINSTALL_SANDBOX/bin" --settings "$UNINSTALL_SANDBOX/settings.json" 2>&1)"
+rc=$?
+cockpit_left="$(jq '[.. | objects | .command? // empty | select(contains("cc-cockpit hook"))] | length' "$UNINSTALL_SANDBOX/settings.json")"
+keep_left="$(jq '[.hooks.Stop[] | .hooks[]? | select(.command == "/usr/bin/echo keep")] | length' "$UNINSTALL_SANDBOX/settings.json")"
+theme="$(jq -r '.theme' "$UNINSTALL_SANDBOX/settings.json")"
+if [ "$rc" -eq 0 ] && [ "$cockpit_left" = "0" ] && [ "$keep_left" = "1" ] && [ "$theme" = "dark" ] && [ ! -e "$UNINSTALL_SANDBOX/bin/cc-cockpit" ]; then
+  pass 'uninstall removes cockpit hooks + symlink, preserves user data'
+else
+  fail "uninstall failed: rc=$rc cockpit_left=$cockpit_left keep_left=$keep_left theme=$theme out='$out'"
+fi
+# Second uninstall must be a clean no-op.
+out="$("$BIN" uninstall --bin-dir "$UNINSTALL_SANDBOX/bin" --settings "$UNINSTALL_SANDBOX/settings.json" 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] && echo "$out" | grep -q 'no cc-cockpit hooks' && echo "$out" | grep -q 'no symlink at'; then
+  pass 'uninstall is idempotent'
+else
+  fail "uninstall second-run was not a no-op: rc=$rc out='$out'"
+fi
+
 # =============================================================
 echo '[1] removed tmux commands are not public CLI'
 # =============================================================
