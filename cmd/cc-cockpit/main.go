@@ -23,7 +23,7 @@ import (
 // Version is the binary's reported version. Overridden at release time via:
 //
 //	go build -ldflags="-X main.Version=<tag>"
-var Version = "0.7.0"
+var Version = "1.0.0"
 
 func main() {
 	if len(os.Args) < 2 {
