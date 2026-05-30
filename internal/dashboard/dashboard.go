@@ -47,6 +47,7 @@ func Run(src Source) error {
 
 	var prevFrame string
 	recaps := newRecapCache()
+	metas := NewSessionMetaLoader()
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -66,10 +67,10 @@ func Run(src Source) error {
 		}
 
 		now := time.Now()
-		metas := LoadSessionMetas(home)
+		sessionMetas := metas.Load(home)
 		recapTexts := recaps.load(samples)
 		agentRollups := loadSubagentRollups(samples, now)
-		frame := RenderMulti(samples, src.HeaderName(samples), now, metas, recapTexts, agentRollups)
+		frame := RenderMulti(samples, src.HeaderName(samples), now, sessionMetas, recapTexts, agentRollups)
 		if stageErr != "" {
 			frame = "⚠ DASHBOARD STAGE FAILED: " + stageErr + " — displayed state may be stale.\n" +
 				"────────────────────────────────────────────────────────────────\n" + frame
@@ -93,7 +94,7 @@ func Run(src Source) error {
 			if info.NewAttention > 0 {
 				totalAttention += info.NewAttention
 				if attentionRepo == "" {
-					attentionRepo, attentionTask = pickAttentionLabels(s.State, metas)
+					attentionRepo, attentionTask = pickAttentionLabels(s.State, sessionMetas)
 				}
 			}
 			if info.MaxSeq > lastBellSeq[s.StateHome] {

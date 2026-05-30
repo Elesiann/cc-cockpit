@@ -3,6 +3,7 @@ package dashboard
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -62,6 +63,141 @@ func TestLoadSessionMetas_ColorFromHistory(t *testing.T) {
 	}
 }
 
+func TestLoadSessionMetas_ColorSurvivesLargeRecentHistory(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	history := `{"display":"/color blue","sessionId":"sid-a","timestamp":1}
+` + strings.Repeat(`{"display":"large later message with no color","sessionId":"sid-b"}
+`, 5000)
+	if err := os.WriteFile(filepath.Join(home, ".claude", "history.jsonl"), []byte(history), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	metas := LoadSessionMetas(home)
+	if got := metas["sid-a"].Color; got != "blue" {
+		t.Errorf("sid-a color: got %q, want blue", got)
+	}
+}
+
+func TestSessionMetaLoader_AppendedHistoryUpdatesColor(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	historyPath := filepath.Join(claudeDir, "history.jsonl")
+	if err := os.WriteFile(historyPath, []byte(`{"display":"/color blue","sessionId":"sid-a"}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewSessionMetaLoader()
+	metas := loader.Load(home)
+	if got := metas["sid-a"].Color; got != "blue" {
+		t.Fatalf("initial color: got %q, want blue", got)
+	}
+
+	f, err := os.OpenFile(historyPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"display":"/color red","sessionId":"sid-a"}
+`); err != nil {
+		_ = f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	metas = loader.Load(home)
+	if got := metas["sid-a"].Color; got != "red" {
+		t.Errorf("appended color: got %q, want red", got)
+	}
+}
+
+func TestSessionMetaLoader_TruncatedHistoryRebuildsColors(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	historyPath := filepath.Join(claudeDir, "history.jsonl")
+	if err := os.WriteFile(historyPath, []byte(`{"display":"/color red","sessionId":"sid-a"}
+{"display":"padding padding padding padding padding","sessionId":"sid-a"}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewSessionMetaLoader()
+	if got := loader.Load(home)["sid-a"].Color; got != "red" {
+		t.Fatalf("initial color: got %q, want red", got)
+	}
+
+	if err := os.WriteFile(historyPath, []byte(`{"display":"/color blue","sessionId":"sid-b"}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	metas := loader.Load(home)
+	if _, ok := metas["sid-a"]; ok {
+		t.Errorf("truncated history should clear stale sid-a color, got %+v", metas["sid-a"])
+	}
+	if got := metas["sid-b"].Color; got != "blue" {
+		t.Errorf("rebuilt color: got %q, want blue", got)
+	}
+}
+
+func TestSessionMetaLoader_MissingHistoryClearsColors(t *testing.T) {
+	home := t.TempDir()
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	historyPath := filepath.Join(claudeDir, "history.jsonl")
+	if err := os.WriteFile(historyPath, []byte(`{"display":"/color red","sessionId":"sid-a"}
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	loader := NewSessionMetaLoader()
+	if got := loader.Load(home)["sid-a"].Color; got != "red" {
+		t.Fatalf("initial color: got %q, want red", got)
+	}
+	if err := os.Remove(historyPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if metas := loader.Load(home); len(metas) != 0 {
+		t.Errorf("missing history should clear cached colors, got %+v", metas)
+	}
+}
+
+func TestSessionMetaLoader_UnknownColorDoesNotOverrideKnownColor(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	history := `{"display":"/color red","sessionId":"sid-a"}
+{"display":"/color catalog-unsplit","sessionId":"sid-a"}
+{"display":"/color blue extra","sessionId":"sid-b"}
+`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "history.jsonl"), []byte(history), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	metas := NewSessionMetaLoader().Load(home)
+	if got := metas["sid-a"].Color; got != "red" {
+		t.Errorf("unknown color should not override known color: got %q, want red", got)
+	}
+	if _, ok := metas["sid-b"]; ok {
+		t.Errorf("multi-token color command should be ignored, got %+v", metas["sid-b"])
+	}
+}
+
 func TestLoadSessionMetas_NoFiles_NoPanic(t *testing.T) {
 	home := t.TempDir()
 	metas := LoadSessionMetas(home)
@@ -76,11 +212,17 @@ func TestAnsiForColor(t *testing.T) {
 		want string
 	}{
 		{"red", "\033[31m"},
+		{"green", "\033[32m"},
+		{"yellow", "\033[33m"},
 		{"GREEN", "\033[32m"},
 		{"  cyan  ", "\033[36m"},
+		{"blue", "\033[34m"},
+		{"magenta", "\033[35m"},
 		{"purple", "\033[35m"}, // alias for magenta
-		{"grey", "\033[90m"},   // alias for gray
-		{"chartreuse", ""},     // unknown → empty (no color)
+		{"white", "\033[37m"},
+		{"gray", "\033[90m"},
+		{"grey", "\033[90m"}, // alias for gray
+		{"chartreuse", ""},   // unknown → empty (no color)
 		{"", ""},
 	}
 	for _, c := range cases {

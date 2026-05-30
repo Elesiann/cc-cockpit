@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,23 +18,43 @@ type SessionMeta struct {
 	Color string // from latest `/color <X>` in ~/.claude/history.jsonl
 }
 
-// historyTailBytes bounds how much of history.jsonl we re-scan each tick.
-// Color commands are typed rarely (handfuls per week, at worst) so 256 KiB
-// of recent history covers months of typical use without parsing the whole
-// file (the user's was 1.9 MB at 0.6.5).
-const historyTailBytes = 256 * 1024
+type SessionMetaLoader struct {
+	colors        map[string]string
+	historyPath   string
+	historyOffset int64
+}
+
+func NewSessionMetaLoader() *SessionMetaLoader {
+	return &SessionMetaLoader{colors: make(map[string]string)}
+}
 
 // LoadSessionMetas builds the sessionId → SessionMeta map for one render
 // tick. Reads:
 //   - every ~/.claude/sessions/*.json for the `name` field (set by /rename).
-//   - the tail of ~/.claude/history.jsonl for the latest /color per sid.
+//   - ~/.claude/history.jsonl for the latest /color per sid.
 //
 // Returns an empty map on I/O errors — the dashboard renders fine without
 // metas, this is purely additive polish.
 func LoadSessionMetas(homeDir string) map[string]SessionMeta {
+	return NewSessionMetaLoader().Load(homeDir)
+}
+
+// Load returns the current session metadata. History colors are indexed
+// incrementally after the first call, while session names are re-read each tick
+// because the current session files are small and represent latest state.
+func (l *SessionMetaLoader) Load(homeDir string) map[string]SessionMeta {
+	if l.colors == nil {
+		l.colors = make(map[string]string)
+	}
+	l.collectHistoryColors(filepath.Join(homeDir, ".claude", "history.jsonl"))
+
 	metas := make(map[string]SessionMeta)
 	collectSessionNames(filepath.Join(homeDir, ".claude", "sessions"), metas)
-	collectHistoryColors(filepath.Join(homeDir, ".claude", "history.jsonl"), metas)
+	for sid, color := range l.colors {
+		m := metas[sid]
+		m.Color = color
+		metas[sid] = m
+	}
 	return metas
 }
 
@@ -65,9 +84,19 @@ func collectSessionNames(dir string, metas map[string]SessionMeta) {
 	}
 }
 
-func collectHistoryColors(path string, metas map[string]SessionMeta) {
+func (l *SessionMetaLoader) collectHistoryColors(path string) {
+	if path != l.historyPath {
+		l.historyPath = path
+		l.historyOffset = 0
+		clear(l.colors)
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			l.historyOffset = 0
+			clear(l.colors)
+		}
 		return
 	}
 	defer f.Close()
@@ -75,45 +104,58 @@ func collectHistoryColors(path string, metas map[string]SessionMeta) {
 	if err != nil {
 		return
 	}
-	// Seek to (size - tail) and skip the first (possibly partial) line.
-	if info.Size() > historyTailBytes {
-		if _, err := f.Seek(info.Size()-historyTailBytes, io.SeekStart); err != nil {
+	if info.Size() < l.historyOffset {
+		// history.jsonl was truncated or rotated. Rebuild from the beginning so
+		// stale colors from the previous file cannot leak into the dashboard.
+		l.historyOffset = 0
+		clear(l.colors)
+	}
+	if info.Size() == l.historyOffset {
+		return
+	}
+	if l.historyOffset > 0 {
+		if _, err := f.Seek(l.historyOffset, 0); err != nil {
 			return
 		}
 	}
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	first := info.Size() > historyTailBytes
 	for scanner.Scan() {
-		if first {
-			// Drop the first line — it likely starts mid-record.
-			first = false
-			continue
-		}
-		line := bytes.TrimSpace(scanner.Bytes())
-		if !bytes.Contains(line, []byte(`"/color `)) {
-			continue
-		}
-		var rec struct {
-			Display   string `json:"display"`
-			SessionID string `json:"sessionId"`
-		}
-		if err := json.Unmarshal(line, &rec); err != nil {
-			continue
-		}
-		if !strings.HasPrefix(rec.Display, "/color ") || rec.SessionID == "" {
-			continue
-		}
-		color := strings.TrimSpace(strings.TrimPrefix(rec.Display, "/color "))
-		if color == "" {
+		sid, color, ok := parseHistoryColorLine(scanner.Bytes())
+		if !ok {
 			continue
 		}
 		// Later entries overwrite earlier — last write per sid wins, which
-		// matches the user's most recent /color intent.
-		m := metas[rec.SessionID]
-		m.Color = color
-		metas[rec.SessionID] = m
+		// matches the user's most recent accepted /color intent.
+		l.colors[sid] = color
 	}
+	l.historyOffset = info.Size()
+}
+
+func parseHistoryColorLine(line []byte) (sid, color string, ok bool) {
+	line = bytes.TrimSpace(line)
+	if !bytes.Contains(line, []byte(`"/color`)) {
+		return "", "", false
+	}
+	var rec struct {
+		Display   string `json:"display"`
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(line, &rec); err != nil {
+		return "", "", false
+	}
+	if rec.SessionID == "" {
+		return "", "", false
+	}
+	fields := strings.Fields(rec.Display)
+	if len(fields) != 2 || fields[0] != "/color" {
+		return "", "", false
+	}
+	color = strings.ToLower(fields[1])
+	if ansiForColor(color) == "" {
+		return "", "", false
+	}
+	return rec.SessionID, color, true
 }
 
 // ansiForColor maps a Claude-Code-style color name to an ANSI escape prefix.
