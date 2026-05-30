@@ -168,6 +168,8 @@ func ansiForColor(name string) string {
 		return "\033[32m"
 	case "yellow":
 		return "\033[33m"
+	case "orange":
+		return "\033[38;5;208m"
 	case "blue":
 		return "\033[34m"
 	case "magenta", "purple":

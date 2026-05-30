@@ -198,6 +198,26 @@ func TestSessionMetaLoader_UnknownColorDoesNotOverrideKnownColor(t *testing.T) {
 	}
 }
 
+func TestSessionMetaLoader_OrangeColorFromHistory(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(home, ".claude", "history.jsonl"),
+		[]byte(`{"display":"/color orange","sessionId":"sid-a"}
+`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	metas := NewSessionMetaLoader().Load(home)
+	if got := metas["sid-a"].Color; got != "orange" {
+		t.Errorf("orange color: got %q, want orange", got)
+	}
+}
+
 func TestLoadSessionMetas_NoFiles_NoPanic(t *testing.T) {
 	home := t.TempDir()
 	metas := LoadSessionMetas(home)
@@ -216,6 +236,7 @@ func TestAnsiForColor(t *testing.T) {
 		{"yellow", "\033[33m"},
 		{"GREEN", "\033[32m"},
 		{"  cyan  ", "\033[36m"},
+		{"orange", "\033[38;5;208m"},
 		{"blue", "\033[34m"},
 		{"magenta", "\033[35m"},
 		{"purple", "\033[35m"}, // alias for magenta
