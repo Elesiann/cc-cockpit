@@ -44,24 +44,7 @@ cc-cockpit lives above the agent layer. It does not dispatch agents, isolate fil
 
 ## Screenshot
 
-```text
-── watch · 3 workspace(s) ──  active=3  🔧 1  ⏸️ 1  💤 1  ended=0 ──
-
-─── active (3) ───
-  STATUS        SID       WS       REPO     TASK       ACT
-  ⏳ processing a7b2...   api      api      auth       2m
-  ⏸️ waiting    3f1c...   portal   portal   review     10s
-  💤 idle       c90e...   infra    infra    ci         14m
-    ↳ recap: Goal: clear migration debt...
-
-─── commands ─── (in any terminal, prefix `cc-cockpit`)
-  end <prefix>               end a session in dashboard state
-  end all-non-ended --yes    nuke every non-ended session
-  reap [--older-than DUR]    sweep stale sessions (default: idle > 1h)
-  Ctrl-C                     exit watch
-```
-
-Actual renders include full task labels, activity timers, `/rename` names, `/color` row coloring, native recaps when available, subagent rollups, and an ended footer.
+<img width="619" height="458" alt="Screenshot_2" src="https://github.com/user-attachments/assets/10d722be-1035-4bb6-b7cb-1bc2eeadd8b9" />
 
 ---
 
