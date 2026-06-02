@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -168,6 +169,9 @@ func runDoctor(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	// Print the running version first so the user (and any pasted bug
+	// report) can tell whether they ran 1.0.1 or a stale go install.
+	fmt.Printf("cc-cockpit %s\n\n", Version)
 	issues := 0
 	ok := func(format string, args ...any) {
 		fmt.Printf("ok: "+format+"\n", args...)
@@ -283,6 +287,12 @@ type endTarget struct {
 // collectEndTargets walks every state dir under the cc-cockpit state root
 // and returns active sessions where predicate(sid, sess) is true. Aggregates
 // across all workspaces so `end` and `reap` work from any terminal.
+//
+// Each events.jsonl is read through state.Snapshot so the read is
+// coordinated with state.Append's exclusive flock — without that, a
+// concurrent writer could leave a torn last line in the reader's view and
+// `reap` would under-count last_activity by one event per session per
+// sweep, missing sessions that are just over the threshold.
 func collectEndTargets(predicate func(string, *state.Session) bool) []endTarget {
 	root := dashboard.DefaultStateRoot(homeDir(), os.Getenv)
 	matches, _ := filepath.Glob(filepath.Join(root, "*", "events.jsonl"))
@@ -292,12 +302,11 @@ func collectEndTargets(predicate func(string, *state.Session) bool) []endTarget 
 	}
 	var targets []endTarget
 	for _, sh := range dirs {
-		f, err := os.Open(filepath.Join(sh, "events.jsonl"))
+		raw, err := state.Snapshot(sh)
 		if err != nil {
 			continue
 		}
-		st := state.Reduce(f)
-		_ = f.Close()
+		st := state.Reduce(bytes.NewReader(raw))
 		for sid, sess := range st.Sessions {
 			if sess.Status == state.StatusEnded {
 				continue
@@ -329,14 +338,17 @@ func applyEndTargets(cmdName, reason string, targets []endTarget) {
 }
 
 func runEnd(args []string) int {
-	// Hand-parse so --yes/-y can appear anywhere (Go's flag pkg stops at the
-	// first positional, which would reject `end all-non-ended --yes`).
-	var yes bool
+	// Hand-parse so --yes/-y/--dry-run can appear anywhere (Go's flag pkg
+	// stops at the first positional, which would reject
+	// `end all-non-ended --yes`).
+	var yes, dryRun bool
 	var posArgs []string
 	for _, a := range args {
 		switch a {
 		case "--yes", "-y":
 			yes = true
+		case "--dry-run", "-n":
+			dryRun = true
 		default:
 			if strings.HasPrefix(a, "-") {
 				die("end", "unknown flag %q", a)
@@ -345,7 +357,7 @@ func runEnd(args []string) int {
 		}
 	}
 	if len(posArgs) == 0 {
-		die("end", "need <session_id-prefix> (or 'all-non-ended') [--yes]")
+		die("end", "need <session_id-prefix> (or 'all-non-ended') [--yes] [--dry-run]")
 	}
 	if len(posArgs) > 1 {
 		die("end", "only one positional argument expected")
@@ -359,6 +371,17 @@ func runEnd(args []string) int {
 
 	if len(targets) == 0 {
 		fmt.Printf("end: no matching non-ended sessions for %q across any workspace\n", prefix)
+		return 0
+	}
+
+	// --dry-run prints the targets and exits 0 without writing. Symmetric
+	// with reap --dry-run; the goal is "show me what would happen" before
+	// committing to it.
+	if dryRun {
+		fmt.Printf("end: would end %d session(s):\n", len(targets))
+		for _, t := range targets {
+			fmt.Printf("  - [%s] %s\n", filepath.Base(t.stateHome), t.sid)
+		}
 		return 0
 	}
 
@@ -516,7 +539,9 @@ func appendSyntheticEnd(stateHome, sid, reason string) error {
 // runWatch renders an aggregate of every workspace under the cc-cockpit state
 // root in the current terminal. Read-only; does not launch or manage Claude
 // processes. Exits on SIGINT/SIGTERM. --ws scopes the view to one or more
-// workspace names (comma-separated or repeated).
+// workspace names (comma-separated or repeated). --color=never suppresses
+// every ANSI escape (per-row /color, gray rollup/recap lines) for clean
+// log capture.
 func runWatch(args []string) int {
 	var allowed []string
 	for i := 0; i < len(args); i++ {
@@ -530,8 +555,12 @@ func runWatch(args []string) int {
 			i++
 		case strings.HasPrefix(a, "--ws="):
 			allowed = append(allowed, splitCSVNonEmpty(strings.TrimPrefix(a, "--ws="))...)
+		case a == "--color=never":
+			dashboard.NoColor = true
+		case a == "--color=auto":
+			dashboard.NoColor = false
 		default:
-			die("watch", "unexpected argument %q (only --ws is supported)", a)
+			die("watch", "unexpected argument %q (only --ws and --color are supported)", a)
 		}
 	}
 	root := dashboard.DefaultStateRoot(homeDir(), os.Getenv)
@@ -558,15 +587,25 @@ func splitCSVNonEmpty(s string) []string {
 
 // ---------- reduce ----------
 
-// runReduce reads events.jsonl on stdin and prints the reduced state as
+// runReduce reads events.jsonl and prints the reduced state as
 // pretty-printed JSON. Used by the smoke test and as a debugging aid:
 //
-//	cc-cockpit reduce < ~/.local/state/cc-cockpit/<ws>/events.jsonl
+//	cc-cockpit reduce                          # read stdin
+//	cc-cockpit reduce <path>/events.jsonl     # read a specific file
 func runReduce(args []string) int {
-	if len(args) > 0 {
-		die("reduce", "unexpected arguments: %v", args)
+	if len(args) > 1 {
+		die("reduce", "expected 0 or 1 arguments, got %d", len(args))
 	}
-	st := state.Reduce(os.Stdin)
+	var in io.Reader = os.Stdin
+	if len(args) == 1 {
+		f, err := os.Open(args[0])
+		if err != nil {
+			die("reduce", "cannot open %s: %v", args[0], err)
+		}
+		defer f.Close()
+		in = f
+	}
+	st := state.Reduce(in)
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	enc.SetEscapeHTML(false)

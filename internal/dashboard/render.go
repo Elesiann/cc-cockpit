@@ -438,6 +438,9 @@ func wrapAgentRollup(r subagent.Rollup, width int) []string {
 		line += " · latest: " + desc
 	}
 	line = truncRunesWithEllipsis(line, width)
+	if NoColor {
+		return []string{line}
+	}
 	return []string{ansiGray + line + ansiReset}
 }
 
@@ -453,6 +456,9 @@ func wrapRecap(text string, width int) []string {
 	}
 	line := prefix + strings.Join(words, " ")
 	line = truncRunesWithEllipsis(line, width)
+	if NoColor {
+		return []string{line}
+	}
 	return []string{ansiGray + line + ansiReset}
 }
 

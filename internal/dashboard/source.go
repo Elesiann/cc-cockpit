@@ -3,15 +3,21 @@ package dashboard
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
+
+// NoColor suppresses every ANSI escape the dashboard emits: per-row
+// /color background, gray subagent rollups, gray recaps. Set by the
+// `watch --color=never` flag (or programmatically for log capture) before
+// Run is invoked. Default false keeps the TUI behavior intact.
+//
+// This is a write-once flag set at startup; the render path is
+// single-goroutine, so no synchronization is needed.
+var NoColor bool
 
 // TaggedState pairs a reduced state with the human name of the workspace it
 // came from. Multi-source renders use Name as the "WS" column.
@@ -73,7 +79,7 @@ func (a AggregateSource) Sample() ([]TaggedState, error) {
 		if allowed != nil && !allowed[name] {
 			continue
 		}
-		raw, err := snapshotBytes(stateHome)
+		raw, err := state.Snapshot(stateHome)
 		if err != nil {
 			// One unreadable workspace shouldn't blank the whole watch
 			// view. Skip it and keep going.
@@ -95,26 +101,6 @@ func (a AggregateSource) HeaderName(samples []TaggedState) string {
 		return fmt.Sprintf("watch · %d/%s", len(samples), strings.Join(a.AllowedWorkspaces, ","))
 	}
 	return fmt.Sprintf("watch · %d workspace(s)", len(samples))
-}
-
-// snapshotBytes is the shared flock-protected read of events.jsonl.
-func snapshotBytes(stateHome string) ([]byte, error) {
-	lockPath := filepath.Join(stateHome, "events.lock")
-	logPath := filepath.Join(stateHome, "events.jsonl")
-	fd, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	defer fd.Close()
-	if err := unix.Flock(int(fd.Fd()), unix.LOCK_SH); err != nil {
-		return nil, err
-	}
-	defer unix.Flock(int(fd.Fd()), unix.LOCK_UN)
-	data, err := os.ReadFile(logPath)
-	if err != nil && os.IsNotExist(err) {
-		return nil, nil
-	}
-	return data, err
 }
 
 // DefaultStateRoot returns the cc-cockpit state root (parent of all per-

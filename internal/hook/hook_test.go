@@ -3,6 +3,7 @@ package hook
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestBuild_SessionStart_PullsFromPayload(t *testing.T) {
@@ -25,13 +26,19 @@ func TestBuild_SessionStart_PullsFromPayload(t *testing.T) {
 	}
 }
 
-func TestBuild_UserPromptSubmit_Truncates80Bytes(t *testing.T) {
-	long := strings.Repeat("a", 200)
-	got := Build("UserPromptSubmit", "sid", map[string]any{"prompt": long})
+func TestBuild_UserPromptSubmit_TruncatesAt80Runes(t *testing.T) {
+	// The cap is rune-based so a 200-ASCII-char input truncates to 80
+	// runes (= 80 bytes for ASCII) and a 200-rune multibyte input
+	// truncates to 80 runes with byte length < 200.
+	longASCII := strings.Repeat("a", 200)
+	got := Build("UserPromptSubmit", "sid", map[string]any{"prompt": longASCII})
 	p := got["payload"].(map[string]any)
-	preview := p["prompt_preview"].(string)
-	if len(preview) != 80 {
-		t.Errorf("prompt_preview length: got %d, want 80", len(preview))
+	preview, _ := p["prompt_preview"].(string)
+	if got := utf8.RuneCountInString(preview); got != 80 {
+		t.Errorf("ASCII preview rune count: got %d, want 80", got)
+	}
+	if !utf8.ValidString(preview) {
+		t.Errorf("ASCII preview must be valid UTF-8")
 	}
 }
 

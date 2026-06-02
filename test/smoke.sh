@@ -348,6 +348,79 @@ cmp -s "$SANDBOX/r1" "$SANDBOX/r2" \
   || fail 'reducer not deterministic'
 
 # =============================================================
+echo '[9] end --dry-run does not write to events.jsonl'
+# =============================================================
+STATE_DRY="$XDG_STATE_HOME/cc-cockpit/dryws"
+mkdir -p "$STATE_DRY"
+cat > "$STATE_DRY/events.jsonl" <<EOF
+{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"dryme","payload":{"cwd":"/r"}}
+EOF
+lines_before=$(wc -l < "$STATE_DRY/events.jsonl")
+out="$("$BIN" end dryme --dry-run 2>&1)"
+rc=$?
+lines_after=$(wc -l < "$STATE_DRY/events.jsonl")
+status_after="$("${REDUCER[@]}" < "$STATE_DRY/events.jsonl" | jq -r '.sessions.dryme.status')"
+if [ "$rc" -eq 0 ] \
+   && [ "$lines_before" = "$lines_after" ] \
+   && [ "$status_after" = "idle" ] \
+   && echo "$out" | grep -q 'would end 1 session'; then
+  pass 'end --dry-run prints targets, writes nothing'
+else
+  fail "end --dry-run: rc=$rc lines_before=$lines_before lines_after=$lines_after status=$status_after out='$out'"
+fi
+
+# A wildcard --dry-run must NOT trigger the --yes guard — it should just
+# report and exit cleanly. This is the whole point of the flag.
+out="$("$BIN" end all-non-ended --dry-run 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] && echo "$out" | grep -q 'would end 1 session'; then
+  pass 'end all-non-ended --dry-run skips the --yes guard'
+else
+  fail "end all-non-ended --dry-run: rc=$rc out='$out'"
+fi
+
+# =============================================================
+echo '[10] reduce <path> matches reduce < file'
+# =============================================================
+cat > "$SANDBOX/reduce-input.jsonl" <<EOF
+{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"r1","payload":{"cwd":"/r"}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"UserPromptSubmit","session_id":"r1","payload":{"prompt_preview":"hi"}}
+EOF
+"${REDUCER[@]}" < "$SANDBOX/reduce-input.jsonl" > "$SANDBOX/r-stdin"
+"$BIN" reduce "$SANDBOX/reduce-input.jsonl" > "$SANDBOX/r-path"
+rc=$?
+if [ "$rc" -eq 0 ] && cmp -s "$SANDBOX/r-stdin" "$SANDBOX/r-path"; then
+  pass 'reduce <path> is byte-identical to reduce < file'
+else
+  fail "reduce <path> differs from stdin: rc=$rc"
+  diff "$SANDBOX/r-stdin" "$SANDBOX/r-path" || true
+fi
+
+out="$("$BIN" reduce /no/such/file.jsonl 2>&1)"
+rc=$?
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'cannot open'; then
+  pass 'reduce <path> errors clearly on missing file'
+else
+  fail "reduce <missing path>: rc=$rc out='$out'"
+fi
+
+# =============================================================
+echo '[11] doctor prints its own version'
+# =============================================================
+# Run inside the same sandboxed env the other doctor tests use, so the
+# binary/settings look complete and doctor returns 0. We're only checking
+# the version header here — the substantive doctor coverage is in [4].
+out="$(cd "$SANDBOX/ws-init" \
+  && CLAUDE_SETTINGS_PATH="$SETTINGS" PATH="$SANDBOX/bin:$PATH" "$BIN" doctor 2>&1)"
+rc=$?
+first_line="$(printf '%s' "$out" | head -n1)"
+if [ "$rc" -eq 0 ] && [ "$first_line" = "cc-cockpit 1.0.0" ]; then
+  pass 'doctor: first line is the running version'
+else
+  fail "doctor version header: rc=$rc first='$first_line'"
+fi
+
+# =============================================================
 echo
 echo "────────────────────────────────────────────"
 printf "PASS: %d   FAIL: %d\n" "$PASS" "$FAIL"

@@ -160,7 +160,11 @@ func parseHistoryColorLine(line []byte) (sid, color string, ok bool) {
 
 // ansiForColor maps a Claude-Code-style color name to an ANSI escape prefix.
 // Returns "" for unknown names — caller treats that as "no color".
+// Returns "" unconditionally when dashboard.NoColor is set (--color=never).
 func ansiForColor(name string) string {
+	if NoColor {
+		return ""
+	}
 	switch strings.ToLower(strings.TrimSpace(name)) {
 	case "red":
 		return "\033[31m"

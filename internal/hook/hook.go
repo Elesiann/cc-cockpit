@@ -8,6 +8,12 @@ import (
 	"github.com/elesiann/cc-cockpit/internal/state"
 )
 
+// previewRuneCap bounds the UserPromptSubmit prompt preview. The cap is
+// expressed in runes (not bytes) so a multibyte prompt — Japanese, emoji,
+// accented Latin — is truncated on a character boundary instead of
+// producing invalid UTF-8.
+const previewRuneCap = 80
+
 // Build returns the event envelope for (event, payload), or nil if the
 // hook should be silently dropped (unknown event, or a Notification whose
 // type isn't in the whitelist).
@@ -27,8 +33,8 @@ func Build(event, sessionID string, payload map[string]any) map[string]any {
 	case state.EventUserPromptSubmit:
 		prompt, _ := payload["prompt"].(string)
 		prompt = strings.ReplaceAll(prompt, "\n", " ")
-		if len(prompt) > 80 {
-			prompt = prompt[:80]
+		if runes := []rune(prompt); len(runes) > previewRuneCap {
+			prompt = string(runes[:previewRuneCap])
 		}
 		return envelope(event, sessionID, map[string]any{"prompt_preview": prompt})
 

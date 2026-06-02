@@ -643,3 +643,43 @@ func TestJsonRawString_NullFallsBack(t *testing.T) {
 		t.Errorf("missing should fall back: got %q", got)
 	}
 }
+
+// TestRender_NoColor_SuppressesAllANSI exercises `watch --color=never`:
+// the per-row /color background, gray agent rollup, and gray recap must
+// all be absent from the rendered output so log capture is clean.
+func TestRender_NoColor_SuppressesAllANSI(t *testing.T) {
+	// Write-once flag; reset after the test so other render tests keep
+	// their default-color behavior.
+	orig := NoColor
+	NoColor = true
+	t.Cleanup(func() { NoColor = orig })
+
+	now := time.Date(2026, 4, 20, 15, 0, 0, 0, time.UTC)
+	// Status=completed + LastActivity 15m old makes effectiveStatus() = idle,
+	// which is the only status where the recap line gets rendered.
+	sess := sessAt(state.StatusCompleted, "2026-04-20T14:30:00Z", "2026-04-20T14:45:00Z", "api", "auth")
+	st := state.State{Sessions: map[string]*state.Session{"sid-color": sess}}
+	metas := map[string]SessionMeta{"sid-color": {Name: "auth", Color: "red"}}
+	recaps := map[string]string{"sid-color": "working on auth refactor"}
+	agents := map[string]subagent.Rollup{"sid-color": {Total: 3, Active: 1, Done: 2, LatestDescription: "explore"}}
+
+	frame := RenderMulti(
+		[]TaggedState{{Name: "ws", State: st}},
+		"watch · 1 workspace(s)",
+		now, metas, recaps, agents,
+	)
+
+	if strings.Contains(frame, "\033[") {
+		t.Errorf("NoColor=true should suppress all ANSI escapes; got:\n%s", frame)
+	}
+	// Sanity: the substantive content is still there.
+	if !strings.Contains(frame, "auth") {
+		t.Errorf("expected session name in output, got:\n%s", frame)
+	}
+	if !strings.Contains(frame, "↳ agents:") {
+		t.Errorf("expected agent rollup line in output, got:\n%s", frame)
+	}
+	if !strings.Contains(frame, "↳ recap:") {
+		t.Errorf("expected recap line in output, got:\n%s", frame)
+	}
+}
