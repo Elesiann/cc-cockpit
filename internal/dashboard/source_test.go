@@ -95,6 +95,14 @@ func TestAggregateSource_HeaderName_WithFilter(t *testing.T) {
 	}
 }
 
+func TestAggregateSource_HeaderName_ShowsNonDefaultSort(t *testing.T) {
+	a := AggregateSource{Sort: SortAttention}
+	got := a.HeaderName(make([]TaggedState, 3))
+	if got != "watch · 3 workspace(s) · sort=attention" {
+		t.Errorf("header: got %q", got)
+	}
+}
+
 func TestAggregateSource_Sample_AppliesAllowList(t *testing.T) {
 	root := t.TempDir()
 	writeEvents(t, filepath.Join(root, "alpha"),

@@ -590,6 +590,75 @@ func TestRenderMultiWithAgentRollups_ShowsOneSubtleLinePerParent(t *testing.T) {
 	}
 }
 
+func TestRenderMulti_ShowsToolAndFailureRollupsForActiveSessions(t *testing.T) {
+	origNoColor := NoColor
+	NoColor = true
+	t.Cleanup(func() { NoColor = origNoColor })
+
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	active := sessAt(state.StatusProcessing, "2026-05-20T11:40:00Z", "2026-05-20T11:59:30Z", "api", "tools")
+	active.ToolCounts = map[string]int{"Bash": 7, "Read": 4, "mcp__very_long_tool_name": 2}
+	active.LastTool = "Bash"
+	active.LastToolAt = "2026-05-20T11:59:22Z"
+	active.FailureCount = 1
+	active.LastFailureTool = "Bash"
+	active.LastFailureAt = "2026-05-20T11:58:00Z"
+
+	ended := sessAt(state.StatusEnded, "2026-05-20T10:00:00Z", "2026-05-20T10:10:00Z", "old", "ended")
+	ended.ToolCounts = map[string]int{"Edit": 99}
+	ended.LastTool = "Edit"
+	ended.LastToolAt = "2026-05-20T10:09:00Z"
+	ended.EndedAt = json.RawMessage(`"2026-05-20T10:10:00Z"`)
+
+	frame := RenderMulti([]TaggedState{{
+		Name: "ws",
+		State: state.State{Sessions: map[string]*state.Session{
+			"active-tools": active,
+			"ended-tools":  ended,
+		}},
+	}}, "watch", now, nil, nil, nil)
+
+	if !strings.Contains(frame, "↳ tools: Bash 7 · Read 4 · mcp__very_long_t 2 · last Bash 38s") {
+		t.Fatalf("tool rollup missing or wrong:\n%s", frame)
+	}
+	if !strings.Contains(frame, "↳ failures: Bash failed 2m ago") {
+		t.Fatalf("failure rollup missing or wrong:\n%s", frame)
+	}
+	if strings.Contains(frame, "Edit 99") {
+		t.Fatalf("ended sessions should not get active tool hints:\n%s", frame)
+	}
+}
+
+func TestRenderMulti_AttentionSortOrdersWaitingStaleBusyIdle(t *testing.T) {
+	origSort, origNoColor := ActiveSort, NoColor
+	ActiveSort = SortAttention
+	NoColor = true
+	t.Cleanup(func() {
+		ActiveSort = origSort
+		NoColor = origNoColor
+	})
+
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	samples := []TaggedState{{
+		Name: "ws",
+		State: state.State{Sessions: map[string]*state.Session{
+			"wait1111": sessAt(state.StatusWaitingInput, "2026-05-20T11:01:00Z", "2026-05-20T11:10:00Z", "api", "wait"),
+			"stale222": sessAt(state.StatusRunning, "2026-05-20T11:02:00Z", "2026-05-20T11:40:00Z", "api", "stale"),
+			"busy3333": sessAt(state.StatusProcessing, "2026-05-20T11:03:00Z", "2026-05-20T11:59:00Z", "api", "busy"),
+			"idle4444": sessAt(state.StatusCompleted, "2026-05-20T11:04:00Z", "2026-05-20T11:30:00Z", "api", "idle"),
+		}},
+	}}
+	frame := RenderMulti(samples, "watch", now, nil, nil, nil)
+	idxWait := strings.Index(frame, "wait1111")
+	idxStale := strings.Index(frame, "stale222")
+	idxBusy := strings.Index(frame, "busy3333")
+	idxIdle := strings.Index(frame, "idle4444")
+	if !(idxWait < idxStale && idxStale < idxBusy && idxBusy < idxIdle) {
+		t.Fatalf("attention sort order wrong: wait=%d stale=%d busy=%d idle=%d\n%s",
+			idxWait, idxStale, idxBusy, idxIdle, frame)
+	}
+}
+
 func TestRenderMultiWithRecaps_ShowsSubtleOneLineRecapOnlyForIdleSessions(t *testing.T) {
 	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
 	samples := []TaggedState{{

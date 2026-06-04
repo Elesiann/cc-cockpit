@@ -96,33 +96,29 @@ func renderMultiHeader(samples []TaggedState, title string) string {
 		dropped += s.State.DroppedEvents
 	}
 	h := fmt.Sprintf("── %s ──  active=%d  🔧 %d  ⏸️ %d  💤 %d  ended=%d ──",
-		truncRunes(title, 32), active, busy, wait, idle, ended)
+		truncRunes(title, 48), active, busy, wait, idle, ended)
 	if dropped > 0 {
 		h += fmt.Sprintf("\n⚠ %d malformed events skipped", dropped)
 	}
 	return h
 }
 
+type activeRow struct {
+	sid  string
+	ws   string
+	sess *state.Session
+}
+
 func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
-	type row struct {
-		sid  string
-		ws   string
-		sess *state.Session
-	}
-	var active []row
+	var active []activeRow
 	for _, s := range samples {
 		for sid, sess := range s.State.Sessions {
 			if sess.Status != state.StatusEnded {
-				active = append(active, row{sid, s.Name, sess})
+				active = append(active, activeRow{sid, s.Name, sess})
 			}
 		}
 	}
-	sort.Slice(active, func(i, j int) bool {
-		if active[i].sess.StartedAt != active[j].sess.StartedAt {
-			return active[i].sess.StartedAt < active[j].sess.StartedAt
-		}
-		return active[i].sid < active[j].sid
-	})
+	sortActiveRows(active, now)
 	if len(active) == 0 {
 		// Distinguish "hooks installed, just no sessions yet" from "no state
 		// dirs at all" (the latter usually means hooks haven't been installed,
@@ -143,6 +139,7 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 	fmt.Fprintln(tw, "  STATUS\tSID\tWS\tREPO\tTASK\tACT")
 	sids := make([]string, len(active))
 	recapSids := make([]string, len(active))
+	sessions := make(map[string]*state.Session, len(active))
 	for i, r := range active {
 		s := r.sess
 		ws := truncRunes(r.ws, 12)
@@ -157,13 +154,57 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 			activitySince(s.LastActivity, now, false),
 		)
 		sids[i] = r.sid
+		sessions[r.sid] = r.sess
 		if effectiveStatus(s, now) == state.StatusIdle {
 			recapSids[i] = r.sid
 		}
 	}
 	_ = tw.Flush()
 	table := colorizeDataRowsWithHeader(b.String(), sids, metas)
-	return insertSessionHints(table, sids, recaps, agents, recapSids, 2)
+	return insertSessionHints(table, sids, sessions, now, recaps, agents, recapSids, 2)
+}
+
+func sortActiveRows(rows []activeRow, now time.Time) {
+	sort.Slice(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		switch ActiveSort {
+		case SortActivity:
+			if a.sess.LastActivity != b.sess.LastActivity {
+				return a.sess.LastActivity > b.sess.LastActivity
+			}
+		case SortAttention:
+			ai, bi := attentionRank(a.sess, now), attentionRank(b.sess, now)
+			if ai != bi {
+				return ai < bi
+			}
+			if a.sess.LastActivity != b.sess.LastActivity {
+				return a.sess.LastActivity > b.sess.LastActivity
+			}
+		default:
+			if a.sess.StartedAt != b.sess.StartedAt {
+				return a.sess.StartedAt < b.sess.StartedAt
+			}
+		}
+		if a.ws != b.ws {
+			return a.ws < b.ws
+		}
+		return a.sid < b.sid
+	})
+}
+
+func attentionRank(s *state.Session, now time.Time) int {
+	if s.Status == state.StatusWaitingInput {
+		return 0
+	}
+	if isStale(s, now) {
+		return 1
+	}
+	switch effectiveStatus(s, now) {
+	case state.StatusRunning, state.StatusThinking, state.StatusProcessing:
+		return 2
+	default:
+		return 3
+	}
 }
 
 func renderMultiEndedFooter(samples []TaggedState, now time.Time) string {
@@ -385,8 +426,8 @@ func colorizeDataRowsWithHeader(table string, sids []string, metas map[string]Se
 	return colorizeDataRows(table, sids, metas, 2)
 }
 
-func insertSessionHints(table string, sids []string, recaps map[string]string, agents map[string]subagent.Rollup, recapSids []string, preambleLines int) string {
-	if len(recaps) == 0 && len(agents) == 0 {
+func insertSessionHints(table string, sids []string, sessions map[string]*state.Session, now time.Time, recaps map[string]string, agents map[string]subagent.Rollup, recapSids []string, preambleLines int) string {
+	if len(recaps) == 0 && len(agents) == 0 && len(sessions) == 0 {
 		return table
 	}
 	recapAllowed := make(map[string]bool, len(recapSids))
@@ -399,6 +440,10 @@ func insertSessionHints(table string, sids []string, recaps map[string]string, a
 	for i := len(sids) - 1; i >= 0; i-- {
 		sid := sids[i]
 		var insert []string
+		if sess := sessions[sid]; sess != nil {
+			insert = append(insert, wrapToolRollup(sess, now, 78)...)
+			insert = append(insert, wrapFailureRollup(sess, now, 78)...)
+		}
 		if rollup, ok := agents[sid]; ok && rollup.Total > 0 {
 			insert = append(insert, wrapAgentRollup(rollup, 78)...)
 		}
@@ -418,6 +463,75 @@ func insertSessionHints(table string, sids []string, recaps map[string]string, a
 		lines = append(lines[:idx+1], append(insert, lines[idx+1:]...)...)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func wrapToolRollup(s *state.Session, now time.Time, width int) []string {
+	if len(s.ToolCounts) == 0 && s.LastTool == "" {
+		return nil
+	}
+	const prefix = "    ↳ tools: "
+	const ansiGray = "\033[90m"
+	parts := topToolParts(s.ToolCounts, 3)
+	if s.LastTool != "" && s.LastToolAt != "" {
+		parts = append(parts, "last "+truncRunes(s.LastTool, 16)+" "+activitySince(s.LastToolAt, now, false))
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	line := truncRunesWithEllipsis(prefix+strings.Join(parts, " · "), width)
+	if NoColor {
+		return []string{line}
+	}
+	return []string{ansiGray + line + ansiReset}
+}
+
+func topToolParts(counts map[string]int, limit int) []string {
+	type item struct {
+		name  string
+		count int
+	}
+	items := make([]item, 0, len(counts))
+	for name, count := range counts {
+		if name == "" || count <= 0 {
+			continue
+		}
+		items = append(items, item{name: name, count: count})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count != items[j].count {
+			return items[i].count > items[j].count
+		}
+		return items[i].name < items[j].name
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	parts := make([]string, 0, len(items))
+	for _, it := range items {
+		parts = append(parts, fmt.Sprintf("%s %d", truncRunes(it.name, 16), it.count))
+	}
+	return parts
+}
+
+func wrapFailureRollup(s *state.Session, now time.Time, width int) []string {
+	if s.FailureCount == 0 || s.LastFailureAt == "" {
+		return nil
+	}
+	const prefix = "    ↳ failures: "
+	const ansiGray = "\033[90m"
+	subject := "turn"
+	if s.LastFailureTool != "" {
+		subject = truncRunes(s.LastFailureTool, 16)
+	}
+	line := prefix + subject + " failed " + activitySince(s.LastFailureAt, now, true)
+	if s.FailureCount > 1 {
+		line += fmt.Sprintf(" · %d total", s.FailureCount)
+	}
+	line = truncRunesWithEllipsis(line, width)
+	if NoColor {
+		return []string{line}
+	}
+	return []string{ansiGray + line + ansiReset}
 }
 
 func wrapAgentRollup(r subagent.Rollup, width int) []string {

@@ -19,6 +19,16 @@ import (
 // single-goroutine, so no synchronization is needed.
 var NoColor bool
 
+const (
+	SortStarted   = "started"
+	SortActivity  = "activity"
+	SortAttention = "attention"
+)
+
+// ActiveSort controls active row ordering. The default preserves the previous
+// watch behavior.
+var ActiveSort = SortStarted
+
 // TaggedState pairs a reduced state with the human name of the workspace it
 // came from. Multi-source renders use Name as the "WS" column.
 type TaggedState struct {
@@ -52,6 +62,7 @@ type Source interface {
 type AggregateSource struct {
 	StateRoot         string // e.g. ~/.local/state/cc-cockpit
 	AllowedWorkspaces []string
+	Sort              string
 }
 
 func (a AggregateSource) Sample() ([]TaggedState, error) {
@@ -97,10 +108,14 @@ func (a AggregateSource) Sample() ([]TaggedState, error) {
 }
 
 func (a AggregateSource) HeaderName(samples []TaggedState) string {
-	if len(a.AllowedWorkspaces) > 0 {
-		return fmt.Sprintf("watch · %d/%s", len(samples), strings.Join(a.AllowedWorkspaces, ","))
+	sortSuffix := ""
+	if a.Sort != "" && a.Sort != SortStarted {
+		sortSuffix = " · sort=" + a.Sort
 	}
-	return fmt.Sprintf("watch · %d workspace(s)", len(samples))
+	if len(a.AllowedWorkspaces) > 0 {
+		return fmt.Sprintf("watch · %d/%s%s", len(samples), strings.Join(a.AllowedWorkspaces, ","), sortSuffix)
+	}
+	return fmt.Sprintf("watch · %d workspace(s)%s", len(samples), sortSuffix)
 }
 
 // DefaultStateRoot returns the cc-cockpit state root (parent of all per-
