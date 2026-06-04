@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -48,6 +49,8 @@ func main() {
 		os.Exit(runHook(args))
 	case "watch":
 		os.Exit(runWatch(args))
+	case "stats":
+		os.Exit(runStats(args))
 	case "reduce":
 		os.Exit(runReduce(args))
 	case "install", "setup":
@@ -70,7 +73,8 @@ Subcommands:
   uninstall           remove cc-cockpit hook entries and the PATH symlink
   init                create optional .cc-cockpit/workspace.json labels
   doctor              check install + optional workspace health
-  watch [--ws X,Y]    headless dashboard: aggregate every workspace's sessions; --ws scopes to selected workspace name(s)
+  watch [--ws X,Y]    headless dashboard; --ws scopes to names, --sort controls active rows
+  stats [--ws X,Y]    print event/session counts from cc-cockpit state logs
   end <prefix>            end a session in dashboard state; works from any terminal (scans all workspaces)
   reap [--older-than DUR] sweep all workspaces, end every non-ended session whose last activity is older than DUR (default: 1h)
   hook <Event>        internal: ingest a Claude Code hook payload
@@ -165,6 +169,7 @@ func runInit(args []string) int {
 
 func runDoctor(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	showState := fs.Bool("state", false, "include cc-cockpit state-log diagnostics")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -202,9 +207,9 @@ func runDoctor(args []string) int {
 	if err != nil {
 		failFix("cc-cockpit install", "Claude settings not found: %s", settingsPath)
 	} else {
-		if hooksOK, err := install.HooksInstalled(settingsRaw); err != nil {
+		if missing, err := install.MissingHookEvents(settingsRaw); err != nil {
 			failFix("cc-cockpit install (rewrites the hooks block)", "Claude settings invalid: %v", err)
-		} else if hooksOK {
+		} else if len(missing) == 0 {
 			ok("Claude hooks installed and executable")
 			// Stale-install check: the hook commands point at a specific
 			// binary path. After `go install`-ing to a different GOPATH,
@@ -224,7 +229,7 @@ func runDoctor(args []string) int {
 				}
 			}
 		} else {
-			failFix("cc-cockpit install", "Claude hooks missing, stale, or pointing at a non-executable cc-cockpit")
+			failFix("cc-cockpit install", "Claude hooks missing, stale, or pointing at a non-executable cc-cockpit: %s", strings.Join(missing, ", "))
 		}
 	}
 
@@ -257,12 +262,139 @@ func runDoctor(args []string) int {
 		}
 	}
 
+	if *showState {
+		stateIssues := printDoctorState(settingsRaw)
+		issues += stateIssues
+	}
+
 	if issues == 0 {
 		fmt.Println("doctor: all checks passed")
 		return 0
 	}
 	fmt.Printf("doctor: %d issue(s) found\n", issues)
 	return 1
+}
+
+func printDoctorState(settingsRaw []byte) int {
+	root := dashboard.DefaultStateRoot(homeDir(), os.Getenv)
+	fmt.Printf("\nstate:\n")
+	fmt.Printf("  root: %s\n", root)
+	issues := 0
+	homes := collectStateHomes(root, nil)
+	if len(homes) == 0 {
+		fmt.Println("  workspace logs: 0")
+	} else {
+		fmt.Printf("  workspace logs: %d\n", len(homes))
+	}
+	type logInfo struct {
+		name      string
+		path      string
+		size      int64
+		malformed int
+	}
+	var logs []logInfo
+	for _, home := range homes {
+		evPath := filepath.Join(home, "events.jsonl")
+		info, err := os.Stat(evPath)
+		if err != nil {
+			continue
+		}
+		malformed := 0
+		if raw, err := state.Snapshot(home); err == nil {
+			malformed = state.Reduce(bytes.NewReader(raw)).DroppedEvents
+		}
+		logs = append(logs, logInfo{
+			name:      filepath.Base(home),
+			path:      evPath,
+			size:      info.Size(),
+			malformed: malformed,
+		})
+	}
+	sort.Slice(logs, func(i, j int) bool {
+		if logs[i].size != logs[j].size {
+			return logs[i].size > logs[j].size
+		}
+		return logs[i].name < logs[j].name
+	})
+	if len(logs) > 0 {
+		fmt.Println("  largest logs:")
+		limit := len(logs)
+		if limit > 5 {
+			limit = 5
+		}
+		for _, l := range logs[:limit] {
+			fmt.Printf("    - %s: %s malformed=%d\n", l.name, humanBytes(l.size), l.malformed)
+		}
+	}
+
+	legacy := findLegacyStateFiles(root)
+	if len(legacy) == 0 {
+		fmt.Println("  legacy files: none")
+	} else {
+		issues++
+		fmt.Println("  legacy files:")
+		for _, p := range legacy {
+			fmt.Printf("    - %s\n", p)
+		}
+	}
+
+	if len(settingsRaw) > 0 {
+		missing, err := install.MissingHookEvents(settingsRaw)
+		if err != nil {
+			fmt.Printf("  hooks: invalid settings: %v\n", err)
+			issues++
+		} else {
+			needed := []string{state.EventStopFailure, state.EventPostToolUseFailure, state.EventPostToolBatch}
+			var missingNew []string
+			for _, ev := range needed {
+				if stringInSlice(ev, missing) {
+					missingNew = append(missingNew, ev)
+				}
+			}
+			if len(missingNew) == 0 {
+				fmt.Println("  hooks: failure/batch events installed")
+			} else {
+				issues++
+				fmt.Printf("  hooks: missing failure/batch events: %s\n", strings.Join(missingNew, ", "))
+			}
+		}
+	}
+	return issues
+}
+
+func findLegacyStateFiles(root string) []string {
+	var out []string
+	for _, pattern := range []string{
+		filepath.Join(root, "cockpit.live.*"),
+		filepath.Join(root, "*", "cockpit.live.*"),
+	} {
+		matches, _ := filepath.Glob(pattern)
+		out = append(out, matches...)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func stringInSlice(s string, values []string) bool {
+	for _, v := range values {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for n >= div*unit && exp < 4 {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -544,6 +676,7 @@ func appendSyntheticEnd(stateHome, sid, reason string) error {
 // log capture.
 func runWatch(args []string) int {
 	var allowed []string
+	sortMode := dashboard.SortStarted
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -559,12 +692,24 @@ func runWatch(args []string) int {
 			dashboard.NoColor = true
 		case a == "--color=auto":
 			dashboard.NoColor = false
+		case a == "--sort":
+			if i+1 >= len(args) {
+				die("watch", "--sort requires a value (started, activity, attention)")
+			}
+			sortMode = args[i+1]
+			i++
+		case strings.HasPrefix(a, "--sort="):
+			sortMode = strings.TrimPrefix(a, "--sort=")
 		default:
-			die("watch", "unexpected argument %q (only --ws and --color are supported)", a)
+			die("watch", "unexpected argument %q (supported: --ws, --color, --sort)", a)
 		}
 	}
+	if sortMode != dashboard.SortStarted && sortMode != dashboard.SortActivity && sortMode != dashboard.SortAttention {
+		die("watch", "invalid --sort %q (want started, activity, or attention)", sortMode)
+	}
+	dashboard.ActiveSort = sortMode
 	root := dashboard.DefaultStateRoot(homeDir(), os.Getenv)
-	src := dashboard.AggregateSource{StateRoot: root, AllowedWorkspaces: allowed}
+	src := dashboard.AggregateSource{StateRoot: root, AllowedWorkspaces: allowed, Sort: sortMode}
 	if err := dashboard.Run(src); err != nil {
 		die("watch", err.Error())
 	}
@@ -583,6 +728,263 @@ func splitCSVNonEmpty(s string) []string {
 		}
 	}
 	return out
+}
+
+// ---------- stats ----------
+
+type statsSession struct {
+	Prompts       int
+	Stops         int
+	Notifications int
+	Permissions   int
+	ToolCalls     int
+	TopTools      map[string]int
+}
+
+type statsWorkspace struct {
+	Name          string
+	Path          string
+	Events        int
+	Malformed     int
+	Prompts       int
+	Stops         int
+	Notifications int
+	Permissions   int
+	ToolCalls     int
+	TopTools      map[string]int
+	Active        int
+	Ended         int
+	Sessions      map[string]*statsSession
+}
+
+func runStats(args []string) int {
+	var allowed []string
+	var since time.Duration
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--ws":
+			if i+1 >= len(args) {
+				die("stats", "--ws requires a value (e.g. --ws api,web)")
+			}
+			allowed = append(allowed, splitCSVNonEmpty(args[i+1])...)
+			i++
+		case strings.HasPrefix(a, "--ws="):
+			allowed = append(allowed, splitCSVNonEmpty(strings.TrimPrefix(a, "--ws="))...)
+		case a == "--since":
+			if i+1 >= len(args) {
+				die("stats", "--since requires a duration (e.g. 24h)")
+			}
+			d, err := time.ParseDuration(args[i+1])
+			if err != nil || d <= 0 {
+				die("stats", "invalid --since %q (want positive duration like 24h)", args[i+1])
+			}
+			since = d
+			i++
+		case strings.HasPrefix(a, "--since="):
+			d, err := time.ParseDuration(strings.TrimPrefix(a, "--since="))
+			if err != nil || d <= 0 {
+				die("stats", "invalid --since %q (want positive duration like 24h)", strings.TrimPrefix(a, "--since="))
+			}
+			since = d
+		default:
+			die("stats", "unexpected argument %q (supported: --ws, --since)", a)
+		}
+	}
+
+	root := dashboard.DefaultStateRoot(homeDir(), os.Getenv)
+	homes := collectStateHomes(root, allowed)
+	cutoff := time.Time{}
+	if since > 0 {
+		cutoff = time.Now().Add(-since)
+	}
+	fmt.Printf("stats: state_root=%s", root)
+	if since > 0 {
+		fmt.Printf(" since=%s", since)
+	}
+	if len(allowed) > 0 {
+		fmt.Printf(" ws=%s", strings.Join(allowed, ","))
+	}
+	fmt.Println()
+	if len(homes) == 0 {
+		fmt.Println("  (no workspace logs found)")
+		return 0
+	}
+	for _, home := range homes {
+		ws, err := readStatsWorkspace(home, cutoff)
+		if err != nil {
+			fmt.Printf("\n[%s]\n  unreadable: %v\n", filepath.Base(home), err)
+			continue
+		}
+		printStatsWorkspace(ws)
+	}
+	return 0
+}
+
+func collectStateHomes(root string, allowed []string) []string {
+	matches, _ := filepath.Glob(filepath.Join(root, "*", "events.jsonl"))
+	sort.Strings(matches)
+	var allow map[string]bool
+	if len(allowed) > 0 {
+		allow = make(map[string]bool, len(allowed))
+		for _, name := range allowed {
+			allow[name] = true
+		}
+	}
+	var homes []string
+	for _, evPath := range matches {
+		home := filepath.Dir(evPath)
+		name := filepath.Base(home)
+		if allow != nil && !allow[name] {
+			continue
+		}
+		homes = append(homes, home)
+	}
+	return homes
+}
+
+func readStatsWorkspace(stateHome string, cutoff time.Time) (statsWorkspace, error) {
+	raw, err := state.Snapshot(stateHome)
+	if err != nil {
+		return statsWorkspace{}, err
+	}
+	st := state.Reduce(bytes.NewReader(raw))
+	ws := statsWorkspace{
+		Name:      filepath.Base(stateHome),
+		Path:      stateHome,
+		Malformed: st.DroppedEvents,
+		TopTools:  make(map[string]int),
+		Sessions:  make(map[string]*statsSession),
+	}
+	for _, sess := range st.Sessions {
+		if sess.Status == state.StatusEnded {
+			ws.Ended++
+		} else {
+			ws.Active++
+		}
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var ev state.Event
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		ts, err := parseEventTime(ev.WallClockISO8601)
+		if err != nil || ev.EventType == "" || ev.SessionID == "" {
+			continue
+		}
+		if !cutoff.IsZero() && ts.Before(cutoff) {
+			continue
+		}
+		ws.Events++
+		ss := ws.Sessions[ev.SessionID]
+		if ss == nil {
+			ss = &statsSession{TopTools: make(map[string]int)}
+			ws.Sessions[ev.SessionID] = ss
+		}
+		switch ev.EventType {
+		case state.EventUserPromptSubmit:
+			ws.Prompts++
+			ss.Prompts++
+		case state.EventStop, state.EventStopFailure:
+			ws.Stops++
+			ss.Stops++
+		case state.EventNotification:
+			ws.Notifications++
+			ss.Notifications++
+		case state.EventPermissionRequest:
+			ws.Permissions++
+			ss.Permissions++
+		case state.EventPostToolUse, state.EventPostToolUseFailure:
+			tool := eventToolName(ev.Payload)
+			ws.ToolCalls++
+			ss.ToolCalls++
+			if tool != "" {
+				ws.TopTools[tool]++
+				ss.TopTools[tool]++
+			}
+		}
+	}
+	return ws, nil
+}
+
+func printStatsWorkspace(ws statsWorkspace) {
+	fmt.Printf("\n[%s]\n", ws.Name)
+	fmt.Printf("  sessions: active=%d ended=%d malformed=%d events=%d\n", ws.Active, ws.Ended, ws.Malformed, ws.Events)
+	fmt.Printf("  counts: prompts=%d stops=%d notifications=%d permissions=%d tool_calls=%d\n",
+		ws.Prompts, ws.Stops, ws.Notifications, ws.Permissions, ws.ToolCalls)
+	if top := formatTopTools(ws.TopTools, 5); top != "" {
+		fmt.Printf("  top_tools: %s\n", top)
+	}
+	sids := sortedKeys(ws.Sessions)
+	for _, sid := range sids {
+		ss := ws.Sessions[sid]
+		if ss.Prompts == 0 && ss.Stops == 0 && ss.Notifications == 0 && ss.Permissions == 0 && ss.ToolCalls == 0 {
+			continue
+		}
+		line := fmt.Sprintf("  - %s: prompts=%d stops=%d notifications=%d permissions=%d tool_calls=%d",
+			shortStatsSID(sid), ss.Prompts, ss.Stops, ss.Notifications, ss.Permissions, ss.ToolCalls)
+		if top := formatTopTools(ss.TopTools, 3); top != "" {
+			line += " top=" + top
+		}
+		fmt.Println(line)
+	}
+}
+
+func eventToolName(raw json.RawMessage) string {
+	var p struct {
+		ToolName string `json:"tool_name"`
+	}
+	_ = json.Unmarshal(raw, &p)
+	return p.ToolName
+}
+
+func parseEventTime(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339Nano, s)
+}
+
+func formatTopTools(counts map[string]int, limit int) string {
+	type item struct {
+		name  string
+		count int
+	}
+	items := make([]item, 0, len(counts))
+	for name, count := range counts {
+		if name != "" && count > 0 {
+			items = append(items, item{name: name, count: count})
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].count != items[j].count {
+			return items[i].count > items[j].count
+		}
+		return items[i].name < items[j].name
+	})
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	parts := make([]string, 0, len(items))
+	for _, it := range items {
+		parts = append(parts, fmt.Sprintf("%s %d", it.name, it.count))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func shortStatsSID(sid string) string {
+	r := []rune(sid)
+	if len(r) <= 8 {
+		return sid
+	}
+	return string(r[:8])
 }
 
 // ---------- reduce ----------

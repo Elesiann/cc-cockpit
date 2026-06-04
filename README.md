@@ -46,12 +46,14 @@ cc-cockpit lives above the agent layer. It does not dispatch agents, isolate fil
 
 <img width="619" height="458" alt="Screenshot_2" src="https://github.com/user-attachments/assets/10d722be-1035-4bb6-b7cb-1bc2eeadd8b9" />
 
+Actual renders include full task labels, activity timers, `/rename` names, `/color` row coloring, compact tool/failure hints, native recaps when available, subagent rollups, and an ended footer.
+
 ---
 
 ## Prerequisites
 
 - Linux, macOS, or WSL2.
-- Claude Code 2.1+ with the hook event model: SessionStart, UserPromptSubmit, PermissionRequest, Notification, PreToolUse, PostToolUse, Stop, SessionEnd.
+- Claude Code 2.1+ with the hook event model: SessionStart, UserPromptSubmit, PermissionRequest, Notification, PreToolUse, PostToolUse, PostToolUseFailure, PostToolBatch, Stop, StopFailure, SessionEnd.
 - Go 1.25+ if building from source.
 
 ---
@@ -90,9 +92,10 @@ The `Notification` hook uses `matcher: "idle_prompt|permission_prompt"`, which i
 ```bash
 cc-cockpit watch                 # every workspace
 cc-cockpit watch --ws api,web    # only these workspaces
+cc-cockpit watch --sort attention
 ```
 
-`watch` opens a read-only dashboard in the current terminal. It scans all state dirs under `~/.local/state/cc-cockpit/*/events.jsonl` or `$XDG_STATE_HOME/cc-cockpit/*/events.jsonl`, then renders one row per non-ended session. The `--ws` flag accepts a comma-separated list (or repeated `--ws=<name>`) and restricts the view to those workspace names — useful when one project is noisy and you want to focus on another.
+`watch` opens a read-only dashboard in the current terminal. It scans all state dirs under `~/.local/state/cc-cockpit/*/events.jsonl` or `$XDG_STATE_HOME/cc-cockpit/*/events.jsonl`, then renders one row per non-ended session. The `--ws` flag accepts a comma-separated list (or repeated `--ws=<name>`) and restricts the view to those workspace names — useful when one project is noisy and you want to focus on another. The `--sort` flag accepts `started` (default), `activity`, or `attention`; `attention` places waiting sessions first, then stale mid-turn sessions, then active work, then idle rows.
 
 The first time you run `watch` on a fresh machine you'll see an `(install) cc-cockpit install in another terminal` hint instead of an empty table — once hooks are installed and you start `claude`, the first row appears within one tick.
 
@@ -107,6 +110,7 @@ You do not need a workspace to use cc-cockpit. Workspaces are only for stable na
 
 - **Granular status:** `running`, `thinking`, `processing`, `waiting`, `completed`, and `idle`, with compact glyphs.
 - **Native names and colors:** Claude Code `/rename` changes the TASK column; `/color <name>` colors the row.
+- **Tool and failure hints:** completed tool calls roll up as a dim `↳ tools:` line, and recent tool/turn failures appear as `↳ failures:`.
 - **Native recaps:** Claude Code `away_summary` text appears as a dim `↳ recap:` line when the session is idle.
 - **Subagent rollups:** sidechain/subagent transcripts appear as a compact `↳ agents:` line below the parent session.
 - **Stale flag:** mid-turn sessions with no events for 15 minutes render with `?`.
@@ -136,8 +140,9 @@ If you skip `init`, sessions still show up under `_global`.
 | `cc-cockpit install [--bin-dir DIR] [--settings FILE] [--no-bin] [--no-hooks]` | Symlink the binary onto `PATH` and merge Claude Code hooks. |
 | `cc-cockpit uninstall [--bin-dir DIR] [--settings FILE] [--no-bin] [--no-hooks]` | Remove cc-cockpit hook entries from `settings.json` and the PATH symlink. Idempotent. |
 | `cc-cockpit init [--name NAME] [repo=path ...]` | Create optional `.cc-cockpit/workspace.json` labels. |
-| `cc-cockpit doctor` | Check binary, Claude, hooks (including stale binary paths), and optional workspace config. |
-| `cc-cockpit watch [--ws X,Y]` | Aggregate every active Claude session in the current terminal. `--ws` restricts to selected workspace name(s). |
+| `cc-cockpit doctor [--state]` | Check binary, Claude, hooks (including stale binary paths), optional workspace config, and state-log diagnostics with `--state`. |
+| `cc-cockpit watch [--ws X,Y] [--sort started\|activity\|attention]` | Aggregate every active Claude session in the current terminal. `--ws` restricts to selected workspace name(s). |
+| `cc-cockpit stats [--ws X,Y] [--since DUR]` | Print per-workspace/session event counts, top tools, malformed events, and active/ended totals from state logs. |
 | `cc-cockpit end <sid-prefix> [--yes]` | Append a synthetic `SessionEnd` for matching non-ended sessions. |
 | `cc-cockpit end all-non-ended --yes` | Mark every currently non-ended session as ended in dashboard state. Always requires `--yes`. |
 | `cc-cockpit reap [--older-than DUR] [--dry-run] [--yes]` | Mark sessions older than `DUR` as ended. Default: `1h`. |

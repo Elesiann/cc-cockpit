@@ -46,17 +46,21 @@ EOF
 out="$("$BIN" install --bin-dir "$SANDBOX/bin" --settings "$SETTINGS" 2>&1)"
 rc=$?
 session_start_count="$(jq '[.hooks.SessionStart[] | .hooks[]? | select(.command | contains("cc-cockpit hook SessionStart"))] | length' "$SETTINGS")"
+failure_hook_count="$(jq '[.hooks.PostToolUseFailure[] | .hooks[]? | select(.command | contains("cc-cockpit hook PostToolUseFailure"))] | length' "$SETTINGS")"
+batch_hook_count="$(jq '[.hooks.PostToolBatch[] | .hooks[]? | select(.command | contains("cc-cockpit hook PostToolBatch"))] | length' "$SETTINGS")"
 notification_matcher="$(jq -r '.hooks.Notification[-1].matcher' "$SETTINGS")"
 preserved_stop="$(jq '[.hooks.Stop[] | .hooks[]? | select(.command == "echo keep")] | length' "$SETTINGS")"
 if [ "$rc" -eq 0 ] \
    && [ -L "$SANDBOX/bin/cc-cockpit" ] \
    && [ "$(readlink -f "$SANDBOX/bin/cc-cockpit")" = "$(readlink -f "$BIN")" ] \
    && [ "$session_start_count" = "1" ] \
+   && [ "$failure_hook_count" = "1" ] \
+   && [ "$batch_hook_count" = "1" ] \
    && [ "$notification_matcher" = "idle_prompt|permission_prompt" ] \
    && [ "$preserved_stop" = "1" ]; then
   pass 'install symlinks binary, installs hooks, preserves unrelated hooks'
 else
-  fail "install failed: rc=$rc out='$out' session_start_count=$session_start_count notification_matcher=$notification_matcher preserved_stop=$preserved_stop"
+  fail "install failed: rc=$rc out='$out' session_start_count=$session_start_count failure_hook_count=$failure_hook_count batch_hook_count=$batch_hook_count notification_matcher=$notification_matcher preserved_stop=$preserved_stop"
 fi
 
 out="$("$BIN" install --bin-dir "$SANDBOX/bin" --settings "$SETTINGS" 2>&1)"
@@ -123,6 +127,13 @@ if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'unexpected argument'; then
   pass 'watch rejects unknown flags'
 else
   fail "watch unknown flag: rc=$rc out='$out'"
+fi
+out="$("$BIN" watch --sort bogus 2>&1)"
+rc=$?
+if [ "$rc" -eq 2 ] && echo "$out" | grep -q 'invalid --sort'; then
+  pass 'watch rejects invalid sort mode'
+else
+  fail "watch invalid sort: rc=$rc out='$out'"
 fi
 
 # =============================================================
@@ -253,6 +264,49 @@ if [ "$rc" -eq 1 ] && echo "$out" | grep -q 'hooks point at' && echo "$out" | gr
   pass 'doctor flags stale hook binary path'
 else
   fail "doctor stale-hook check failed: rc=$rc out='$out'"
+fi
+
+STATE_STATS="$XDG_STATE_HOME/cc-cockpit/statsws"
+mkdir -p "$STATE_STATS"
+cat > "$STATE_STATS/events.jsonl" <<EOF
+{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"stat1","payload":{"cwd":"/r"}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"UserPromptSubmit","session_id":"stat1","payload":{"prompt_preview":"x"}}
+{"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"PostToolUse","session_id":"stat1","payload":{"tool_name":"Bash"}}
+{"seq":4,"wall_clock_iso8601":"2026-04-20T15:00:03Z","event_type":"PostToolUseFailure","session_id":"stat1","payload":{"tool_name":"Read","error":"nope"}}
+{"seq":5,"wall_clock_iso8601":"2026-04-20T15:00:04Z","event_type":"Notification","session_id":"stat1","payload":{"notification_type":"idle_prompt"}}
+EOF
+out="$("$BIN" stats --ws statsws --since 240000h 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] \
+   && echo "$out" | grep -q '\[statsws\]' \
+   && echo "$out" | grep -q 'prompts=1' \
+   && echo "$out" | grep -q 'notifications=1' \
+   && echo "$out" | grep -q 'tool_calls=2' \
+   && echo "$out" | grep -q 'Bash 1' \
+   && echo "$out" | grep -q 'Read 1'; then
+  pass 'stats reports workspace/session event and tool counts'
+else
+  fail "stats output wrong: rc=$rc out='$out'"
+fi
+
+out="$(cd "$SANDBOX/ws-init" \
+  && CLAUDE_SETTINGS_PATH="$SETTINGS" PATH="$SANDBOX/bin:$PATH" "$BIN" doctor --state 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] \
+   && echo "$out" | grep -q 'state:' \
+   && echo "$out" | grep -q 'workspace logs:' \
+   && echo "$out" | grep -q 'hooks: failure/batch events installed'; then
+  pass 'doctor --state reports state root, logs, and new hooks'
+else
+  fail "doctor --state failed: rc=$rc out='$out'"
+fi
+
+out="$(timeout 2s "$BIN" watch --color=never --sort attention 2>&1)"
+rc=$?
+if { [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]; } && echo "$out" | grep -q 'sort=attention'; then
+  pass 'watch --sort attention renders sort in header'
+else
+  fail "watch --sort attention smoke failed: rc=$rc out='$out'"
 fi
 
 # =============================================================
