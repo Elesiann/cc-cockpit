@@ -5,14 +5,17 @@ import "encoding/json"
 
 // Event types emitted by Claude Code hooks.
 const (
-	EventSessionStart      = "SessionStart"
-	EventUserPromptSubmit  = "UserPromptSubmit"
-	EventPermissionRequest = "PermissionRequest"
-	EventNotification      = "Notification"
-	EventPreToolUse        = "PreToolUse"
-	EventPostToolUse       = "PostToolUse"
-	EventStop              = "Stop"
-	EventSessionEnd        = "SessionEnd"
+	EventSessionStart       = "SessionStart"
+	EventUserPromptSubmit   = "UserPromptSubmit"
+	EventPermissionRequest  = "PermissionRequest"
+	EventNotification       = "Notification"
+	EventPreToolUse         = "PreToolUse"
+	EventPostToolUse        = "PostToolUse"
+	EventPostToolUseFailure = "PostToolUseFailure"
+	EventPostToolBatch      = "PostToolBatch"
+	EventStop               = "Stop"
+	EventStopFailure        = "StopFailure"
+	EventSessionEnd         = "SessionEnd"
 )
 
 // Reduced session statuses. Granular states derived from the event sequence:
@@ -60,6 +63,13 @@ type Session struct {
 	LastActivity      string          `json:"last_activity"`
 	LastPromptPreview json.RawMessage `json:"last_prompt_preview"`
 	CurrentTool       string          `json:"current_tool,omitempty"`
+	ToolCounts        map[string]int  `json:"tool_counts,omitempty"`
+	LastTool          string          `json:"last_tool,omitempty"`
+	LastToolAt        string          `json:"last_tool_at,omitempty"`
+	FailureCount      int             `json:"failure_count,omitempty"`
+	LastFailureTool   string          `json:"last_failure_tool,omitempty"`
+	LastFailureAt     string          `json:"last_failure_at,omitempty"`
+	LastFailure       string          `json:"last_failure,omitempty"`
 	ResumedAt         string          `json:"resumed_at,omitempty"`
 	EndedAt           json.RawMessage `json:"ended_at,omitempty"`
 	Dismissed         *bool           `json:"dismissed,omitempty"`

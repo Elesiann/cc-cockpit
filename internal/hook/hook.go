@@ -41,6 +41,10 @@ func Build(event, sessionID string, payload map[string]any) map[string]any {
 	case state.EventPermissionRequest, state.EventStop, state.EventSessionEnd:
 		return envelope(event, sessionID, map[string]any{})
 
+	case state.EventStopFailure:
+		errMsg, _ := payload["error"].(string)
+		return envelope(event, sessionID, map[string]any{"error": errMsg})
+
 	case state.EventNotification:
 		ntype, _ := payload["notification_type"].(string)
 		if ntype != "idle_prompt" && ntype != "permission_prompt" {
@@ -55,6 +59,26 @@ func Build(event, sessionID string, payload map[string]any) map[string]any {
 	case state.EventPostToolUse:
 		tool, _ := payload["tool_name"].(string)
 		return envelope(event, sessionID, map[string]any{"tool_name": tool, "success": true})
+
+	case state.EventPostToolUseFailure:
+		tool, _ := payload["tool_name"].(string)
+		errMsg, _ := payload["error"].(string)
+		out := map[string]any{
+			"tool_name": tool,
+			"success":   false,
+			"error":     errMsg,
+		}
+		if isInterrupt, ok := payload["is_interrupt"].(bool); ok {
+			out["is_interrupt"] = isInterrupt
+		}
+		if duration, ok := payload["duration_ms"].(float64); ok {
+			out["duration_ms"] = duration
+		}
+		return envelope(event, sessionID, out)
+
+	case state.EventPostToolBatch:
+		calls, _ := payload["tool_calls"].([]any)
+		return envelope(event, sessionID, map[string]any{"tool_count": len(calls)})
 	}
 	return nil
 }

@@ -100,6 +100,38 @@ func TestBuild_PostToolUse_AlwaysSuccessTrue(t *testing.T) {
 	}
 }
 
+func TestBuild_FailureAndBatchEvents(t *testing.T) {
+	fail := Build("PostToolUseFailure", "sid", map[string]any{
+		"tool_name":    "Bash",
+		"error":        "exit status 1",
+		"is_interrupt": true,
+		"duration_ms":  42.0,
+	})
+	if fail == nil {
+		t.Fatalf("PostToolUseFailure should be accepted")
+	}
+	p := fail["payload"].(map[string]any)
+	if p["tool_name"] != "Bash" || p["success"] != false || p["error"] != "exit status 1" {
+		t.Fatalf("failure payload wrong: %#v", p)
+	}
+
+	stop := Build("StopFailure", "sid", map[string]any{"error": "hook failed"})
+	if stop == nil {
+		t.Fatalf("StopFailure should be accepted")
+	}
+	if got := stop["payload"].(map[string]any)["error"]; got != "hook failed" {
+		t.Fatalf("StopFailure error: got %#v", got)
+	}
+
+	batch := Build("PostToolBatch", "sid", map[string]any{"tool_calls": []any{"a", "b"}})
+	if batch == nil {
+		t.Fatalf("PostToolBatch should be accepted")
+	}
+	if got := batch["payload"].(map[string]any)["tool_count"]; got != 2 {
+		t.Fatalf("tool_count: got %#v, want 2", got)
+	}
+}
+
 func TestBuild_UnknownEventDropped(t *testing.T) {
 	if got := Build("Unknown", "sid", nil); got != nil {
 		t.Errorf("unknown event should be dropped, got %#v", got)

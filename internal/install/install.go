@@ -23,7 +23,10 @@ var Events = []string{
 	state.EventNotification,
 	state.EventPreToolUse,
 	state.EventPostToolUse,
+	state.EventPostToolUseFailure,
+	state.EventPostToolBatch,
 	state.EventStop,
+	state.EventStopFailure,
 	state.EventSessionEnd,
 }
 
@@ -190,33 +193,47 @@ func InstallHooks(settingsPath, binPath string) error {
 // "idle_prompt|permission_prompt" matcher. Empty/missing settings → false.
 // JSON parse errors propagate. Read-only: never mutates input.
 func HooksInstalled(settingsData []byte) (bool, error) {
+	missing, err := MissingHookEvents(settingsData)
+	if err != nil || len(missing) > 0 {
+		return false, err
+	}
+	return true, nil
+}
+
+// MissingHookEvents returns installed event names whose cc-cockpit hook entry
+// is absent or points at an unusable binary. Notification also requires the
+// expected matcher.
+func MissingHookEvents(settingsData []byte) ([]string, error) {
 	if len(bytes.TrimSpace(settingsData)) == 0 {
-		return false, nil
+		return append([]string(nil), Events...), nil
 	}
 	var top struct {
 		Hooks map[string][]any `json:"hooks"`
 	}
 	if err := json.Unmarshal(settingsData, &top); err != nil {
-		return false, err
+		return nil, err
 	}
+	var missing []string
 	for _, ev := range Events {
 		found := false
 		for _, e := range top.Hooks[ev] {
+			if ev == state.EventNotification {
+				if EntryHasMatcher(e, "idle_prompt|permission_prompt") && cockpitHookEntryUsable(e) {
+					found = true
+					break
+				}
+				continue
+			}
 			if cockpitHookEntryUsable(e) {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return false, nil
+			missing = append(missing, ev)
 		}
 	}
-	for _, e := range top.Hooks[state.EventNotification] {
-		if EntryHasMatcher(e, "idle_prompt|permission_prompt") && cockpitHookEntryUsable(e) {
-			return true, nil
-		}
-	}
-	return false, nil
+	return missing, nil
 }
 
 func cockpitHookEntryUsable(e any) bool {

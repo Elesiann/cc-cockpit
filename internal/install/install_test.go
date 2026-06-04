@@ -194,6 +194,52 @@ func TestEvents_IncludesBothToolUseHooks(t *testing.T) {
 	}
 }
 
+func TestEvents_IncludesFailureAndBatchHooks(t *testing.T) {
+	need := map[string]bool{
+		state.EventStopFailure:        false,
+		state.EventPostToolUseFailure: false,
+		state.EventPostToolBatch:      false,
+	}
+	for _, ev := range Events {
+		if _, ok := need[ev]; ok {
+			need[ev] = true
+		}
+	}
+	for ev, found := range need {
+		if !found {
+			t.Errorf("Events missing %s", ev)
+		}
+	}
+}
+
+func TestMissingHookEvents_ReportsStaleSettings(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "cc-cockpit")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := MergeHooks(nil, bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(merged, &top); err != nil {
+		t.Fatal(err)
+	}
+	hooks := top["hooks"].(map[string]any)
+	delete(hooks, state.EventPostToolUseFailure)
+	stale, err := json.Marshal(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, err := MissingHookEvents(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(missing) != 1 || missing[0] != state.EventPostToolUseFailure {
+		t.Fatalf("missing: got %v, want [%s]", missing, state.EventPostToolUseFailure)
+	}
+}
+
 func TestHooksInstalled_EmptyReturnsFalse(t *testing.T) {
 	ok, err := HooksInstalled(nil)
 	if err != nil || ok {

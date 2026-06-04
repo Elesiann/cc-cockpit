@@ -149,6 +149,7 @@ func applyEvent(state *State, ev *Event) {
 			sess.Status = StatusRunning
 			sess.CurrentTool = p.ToolName
 		}
+		rememberTool(sess, p.ToolName, ev.WallClockISO8601, false)
 		sess.LastActivity = ev.WallClockISO8601
 
 	case EventPostToolUse:
@@ -163,6 +164,36 @@ func applyEvent(state *State, ev *Event) {
 			sess.Status = StatusProcessing
 			sess.CurrentTool = ""
 		}
+		var p struct {
+			ToolName string `json:"tool_name"`
+		}
+		_ = json.Unmarshal(ev.Payload, &p)
+		rememberTool(sess, p.ToolName, ev.WallClockISO8601, true)
+		sess.LastActivity = ev.WallClockISO8601
+
+	case EventPostToolUseFailure:
+		sess, ok := state.Sessions[ev.SessionID]
+		if !ok {
+			return
+		}
+		var p struct {
+			ToolName string `json:"tool_name"`
+			Error    string `json:"error"`
+		}
+		_ = json.Unmarshal(ev.Payload, &p)
+		if sess.Status != StatusIdle && sess.Status != StatusCompleted && sess.Status != StatusEnded {
+			sess.Status = StatusProcessing
+			sess.CurrentTool = ""
+		}
+		rememberTool(sess, p.ToolName, ev.WallClockISO8601, true)
+		rememberFailure(sess, p.ToolName, p.Error, ev.WallClockISO8601)
+		sess.LastActivity = ev.WallClockISO8601
+
+	case EventPostToolBatch:
+		sess, ok := state.Sessions[ev.SessionID]
+		if !ok || sess.Status == StatusEnded {
+			return
+		}
 		sess.LastActivity = ev.WallClockISO8601
 
 	case EventStop:
@@ -172,6 +203,20 @@ func applyEvent(state *State, ev *Event) {
 		}
 		sess.Status = StatusCompleted
 		sess.CurrentTool = ""
+		sess.LastActivity = ev.WallClockISO8601
+
+	case EventStopFailure:
+		sess, ok := state.Sessions[ev.SessionID]
+		if !ok || sess.Status == StatusEnded {
+			return
+		}
+		var p struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(ev.Payload, &p)
+		sess.Status = StatusCompleted
+		sess.CurrentTool = ""
+		rememberFailure(sess, "", p.Error, ev.WallClockISO8601)
 		sess.LastActivity = ev.WallClockISO8601
 
 	case EventSessionEnd:
@@ -192,6 +237,37 @@ func applyEvent(state *State, ev *Event) {
 		synth := p.Synthetic
 		sess.Dismissed = &synth
 	}
+}
+
+func rememberTool(sess *Session, name, at string, count bool) {
+	if name == "" {
+		return
+	}
+	sess.LastTool = name
+	sess.LastToolAt = at
+	if !count {
+		return
+	}
+	if sess.ToolCounts == nil {
+		sess.ToolCounts = make(map[string]int)
+	}
+	sess.ToolCounts[name]++
+}
+
+func rememberFailure(sess *Session, tool, msg, at string) {
+	sess.FailureCount++
+	sess.LastFailureTool = tool
+	sess.LastFailureAt = at
+	sess.LastFailure = truncFailure(msg)
+}
+
+func truncFailure(s string) string {
+	const maxRunes = 120
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes])
 }
 
 func isDismissed(s *Session) bool {

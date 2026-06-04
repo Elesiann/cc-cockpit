@@ -248,6 +248,46 @@ func TestReducer_PreToolUseSetsCurrentTool(t *testing.T) {
 	}
 }
 
+func TestReducer_ToolCountsAndFailures(t *testing.T) {
+	input := `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"UserPromptSubmit","session_id":"s1","payload":{"prompt_preview":"x"}}
+{"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"PreToolUse","session_id":"s1","payload":{"tool_name":"Bash"}}
+{"seq":4,"wall_clock_iso8601":"2026-04-20T15:00:03Z","event_type":"PostToolUse","session_id":"s1","payload":{"tool_name":"Bash"}}
+{"seq":5,"wall_clock_iso8601":"2026-04-20T15:00:04Z","event_type":"PostToolUseFailure","session_id":"s1","payload":{"tool_name":"Read","error":"missing file"}}
+{"seq":6,"wall_clock_iso8601":"2026-04-20T15:00:05Z","event_type":"StopFailure","session_id":"s1","payload":{"error":"turn failed"}}`
+	st := Reduce(strings.NewReader(input))
+	s1 := st.Sessions["s1"]
+	if s1.ToolCounts["Bash"] != 1 || s1.ToolCounts["Read"] != 1 {
+		t.Fatalf("tool counts wrong: %#v", s1.ToolCounts)
+	}
+	if s1.LastTool != "Read" || s1.LastToolAt != "2026-04-20T15:00:04Z" {
+		t.Fatalf("last tool wrong: %q at %q", s1.LastTool, s1.LastToolAt)
+	}
+	if s1.FailureCount != 2 {
+		t.Fatalf("failure_count: got %d, want 2", s1.FailureCount)
+	}
+	if s1.LastFailureTool != "" || s1.LastFailureAt != "2026-04-20T15:00:05Z" || s1.LastFailure != "turn failed" {
+		t.Fatalf("last failure wrong: tool=%q at=%q msg=%q", s1.LastFailureTool, s1.LastFailureAt, s1.LastFailure)
+	}
+	if s1.Status != StatusCompleted {
+		t.Fatalf("StopFailure should leave the turn settled as completed, got %q", s1.Status)
+	}
+}
+
+func TestReducer_PostToolBatchUpdatesActivityOnly(t *testing.T) {
+	input := `{"seq":1,"wall_clock_iso8601":"2026-04-20T15:00:00Z","event_type":"SessionStart","session_id":"s1","payload":{}}
+{"seq":2,"wall_clock_iso8601":"2026-04-20T15:00:01Z","event_type":"UserPromptSubmit","session_id":"s1","payload":{"prompt_preview":"x"}}
+{"seq":3,"wall_clock_iso8601":"2026-04-20T15:00:02Z","event_type":"PostToolBatch","session_id":"s1","payload":{"tool_count":2}}`
+	st := Reduce(strings.NewReader(input))
+	s1 := st.Sessions["s1"]
+	if s1.Status != StatusThinking {
+		t.Fatalf("PostToolBatch should not change status, got %q", s1.Status)
+	}
+	if s1.LastActivity != "2026-04-20T15:00:02Z" {
+		t.Fatalf("last activity: got %q", s1.LastActivity)
+	}
+}
+
 func TestReducer_EventForUnknownSessionIsIgnored(t *testing.T) {
 	// Events for sessions we never saw a SessionStart for must be ignored
 	// (except we still count last_seq).
