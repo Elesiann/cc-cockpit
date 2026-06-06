@@ -14,11 +14,16 @@ import (
 // sidecarDir is the per-workspace subdirectory holding session->window bindings.
 const sidecarDir = "windows"
 
-// captureAttempts retries the focused-window read in case focus is momentarily
-// elsewhere when the detached capture runs. retryDelay spaces the attempts.
+// captureAttempts bounds the focused-window reads; retryDelay spaces them.
+// stableReads is how many consecutive reads must agree before a binding is
+// persisted: the detached capture only proves "some WT window is focused now",
+// so requiring the same window+tab twice in a row rejects the case where focus
+// moved between reads (e.g. the user alt-tabbed during powershell cold start),
+// which would otherwise bind the session to whatever window happened to be up.
 const (
-	captureAttempts = 3
+	captureAttempts = 4
 	retryDelay      = 300 * time.Millisecond
+	stableReads     = 2
 )
 
 // Binding is a session's resolved Windows Terminal location: the window handle
@@ -54,22 +59,54 @@ func Capture(stateHome, sessionID string) error {
 		return nil
 	}
 
-	var b Binding
-	var err error
-	for attempt := 1; attempt <= captureAttempts; attempt++ {
-		b, err = focusedWindow()
-		Debugf("capture sid=%s attempt=%d hwnd=%q tabRID=%q err=%v", sessionID, attempt, b.HWND, b.TabRID, err)
-		if err == nil {
-			break
-		}
-		if attempt < captureAttempts {
-			time.Sleep(retryDelay)
-		}
-	}
+	b, ok, err := captureStable(focusedWindow, retryDelay)
+	Debugf("capture sid=%s stable=%v hwnd=%q tabRID=%q err=%v", sessionID, ok, b.HWND, b.TabRID, err)
 	if err != nil {
 		return err
 	}
+	if !ok {
+		// Focus never settled on one window across reads — ambiguous, so bind
+		// nothing rather than risk the wrong window.
+		return nil
+	}
 	return writeBinding(stateHome, sessionID, b)
+}
+
+// captureStable reads the focused window up to captureAttempts times, spacing
+// reads by delay, and returns a binding only once the same window+tab is seen
+// stableReads times in a row. ok is false when focus never settled (return the
+// zero Binding); err is the last read error and is only meaningful when every
+// read failed (ok false, streak never started). A successful read is never the
+// zero Binding (focusedWindow errors on an empty HWND), so the initial
+// last == Binding{} can't false-match.
+func captureStable(read func() (Binding, error), delay time.Duration) (b Binding, ok bool, err error) {
+	var (
+		last    Binding
+		streak  int
+		lastErr error
+	)
+	for attempt := 1; attempt <= captureAttempts; attempt++ {
+		got, rerr := read()
+		if rerr != nil {
+			lastErr = rerr
+		} else {
+			if got == last {
+				streak++
+			} else {
+				last, streak = got, 1
+			}
+			if streak >= stableReads {
+				return last, true, nil
+			}
+		}
+		if attempt < captureAttempts {
+			time.Sleep(delay)
+		}
+	}
+	if streak == 0 {
+		return Binding{}, false, lastErr // every attempt errored
+	}
+	return Binding{}, false, nil
 }
 
 // focusedWindow returns the binding for the currently focused Windows Terminal
