@@ -34,6 +34,7 @@ func Run(src Source) error {
 	// watch stays exactly as it was — render-only. If stdin isn't a terminal,
 	// enableCharInput fails and we silently fall back to non-interactive.
 	var keyCh chan key
+	var focuser *winfocus.Focuser
 	if winfocus.Enabled() {
 		if restore, err := enableCharInput(int(os.Stdin.Fd())); err == nil {
 			defer restore()
@@ -44,6 +45,13 @@ func Run(src Source) error {
 			// is fixed per session) instead of activity/attention, which
 			// re-rank as time passes.
 			ActiveSort = SortStarted
+			// Warm focus helper: keeps powershell + UIA loaded so each Enter is
+			// a pipe write, not a ~1s cold start. Best-effort; nil falls back
+			// to a cold one-shot per focus.
+			if fc, ferr := winfocus.NewFocuser(); ferr == nil {
+				focuser = fc
+				defer focuser.Close()
+			}
 		}
 	}
 	// Selection tracks the session id, not a row index: when a new snapshot
@@ -221,7 +229,7 @@ func Run(src Source) error {
 				StatusLine = ""
 			case keyEnter:
 				if i := rowIndex(rows, selectedSID); i >= 0 {
-					focusRow(rows[i])
+					focusRow(focuser, rows[i])
 				}
 			case keyQuit:
 				return nil
@@ -257,14 +265,19 @@ func rowIndex(rows []activeRow, sid string) int {
 // focusRow raises the Windows Terminal window bound to the selected session.
 // The actual focus call is slow (cold powershell.exe), so it runs in a
 // goroutine to keep the dashboard responsive; StatusLine reports the attempt.
-func focusRow(r activeRow) {
+func focusRow(f *winfocus.Focuser, r activeRow) {
 	b, ok := winfocus.ReadBinding(r.home, r.sid)
 	if !ok {
 		StatusLine = "no window bound for " + shortSID(r.sid) + " — start a fresh claude session under WSL+WT"
 		return
 	}
 	StatusLine = "→ focusing " + sessionRepoLabel(r.sess) + " (" + shortSID(r.sid) + ")"
-	go func() { _ = winfocus.Focus(b) }()
+	go func() {
+		if f != nil && f.Focus(b) == nil {
+			return
+		}
+		_ = winfocus.Focus(b) // fallback: cold one-shot
+	}()
 }
 
 // loadBellSeq returns the persisted bell baseline for stateHome, falling back
