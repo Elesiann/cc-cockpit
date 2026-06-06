@@ -15,37 +15,63 @@ const (
 
 // readKeys decodes keypresses from r and sends them on ch until r errors
 // (e.g. on shutdown). It recognizes arrow keys (CSI A/B), Enter, vim-style
-// j/k, and q. Escape sequences are expected to arrive within a single Read,
-// which holds for terminal input in practice; a sequence split across reads is
-// simply ignored rather than mis-decoded.
+// j/k, and q. Because stdin is in VMIN=1 mode, a multi-byte escape sequence can
+// arrive split across reads, so unconsumed bytes are carried over to the next
+// read rather than dropped — otherwise arrow presses would intermittently go
+// missing and feel laggy.
 func readKeys(r io.Reader, ch chan<- key) {
+	var pending []byte
 	buf := make([]byte, 16)
 	for {
 		n, err := r.Read(buf)
+		if n > 0 {
+			pending = parseKeys(append(pending, buf[:n]...), ch)
+		}
 		if err != nil {
 			return
 		}
-		for i := 0; i < n; i++ {
-			switch b := buf[i]; {
-			case b == 0x1b: // ESC: maybe a CSI arrow sequence
-				if i+2 < n && buf[i+1] == '[' {
-					switch buf[i+2] {
-					case 'A':
-						ch <- keyUp
-					case 'B':
-						ch <- keyDown
-					}
-					i += 2
-				}
-			case b == '\r' || b == '\n':
-				ch <- keyEnter
-			case b == 'k':
-				ch <- keyUp
-			case b == 'j':
-				ch <- keyDown
-			case b == 'q':
-				ch <- keyQuit
+	}
+}
+
+// parseKeys consumes complete key tokens from b, emits them on ch, and returns
+// the unconsumed tail (an incomplete escape sequence awaiting more bytes).
+func parseKeys(b []byte, ch chan<- key) []byte {
+	i := 0
+	for i < len(b) {
+		switch c := b[i]; {
+		case c == 0x1b: // ESC — possibly a CSI arrow sequence
+			if i+1 >= len(b) {
+				return b[i:] // incomplete: wait for more
 			}
+			if b[i+1] == '[' {
+				if i+2 >= len(b) {
+					return b[i:] // incomplete CSI: wait for more
+				}
+				switch b[i+2] {
+				case 'A':
+					ch <- keyUp
+				case 'B':
+					ch <- keyDown
+				}
+				i += 3
+				continue
+			}
+			i++ // lone ESC or unhandled sequence
+		case c == '\r' || c == '\n':
+			ch <- keyEnter
+			i++
+		case c == 'k':
+			ch <- keyUp
+			i++
+		case c == 'j':
+			ch <- keyDown
+			i++
+		case c == 'q':
+			ch <- keyQuit
+			i++
+		default:
+			i++
 		}
 	}
+	return nil
 }
