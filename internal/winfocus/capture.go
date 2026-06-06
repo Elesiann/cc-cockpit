@@ -76,10 +76,10 @@ func Capture(stateHome, sessionID, pts string) error {
 	// it. Retry because at SessionStart Claude's repaint can wipe the marker
 	// before UI Automation reads it; each attempt re-stamps a fresh marker.
 	for attempt := 1; attempt <= captureAttempts; attempt++ {
-		// Conceal the marker (SGR 8) so that even if the clear misses — Claude
-		// may move the cursor between stamp and clear — no readable text is
-		// left on screen. UIA TextPattern still reads the characters.
-		if err := writeToPTS(pts, "\r\033[8m"+marker+"\033[0m"); err != nil {
+		// Windows Terminal renders SGR 8 (conceal) text visibly, so we can't
+		// hide the marker by attribute. It is written plainly and cleared right
+		// after the scan; skip-if-bound above keeps this to once per session.
+		if err := writeToPTS(pts, "\r"+marker); err != nil {
 			return err
 		}
 		time.Sleep(markerSettleDelay)
