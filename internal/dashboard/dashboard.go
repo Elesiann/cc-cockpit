@@ -176,6 +176,11 @@ func Run(src Source) error {
 			frame = "⚠ DASHBOARD STAGE FAILED: " + stageErr + " — displayed state may be stale.\n" +
 				"────────────────────────────────────────────────────────────────\n" + frame
 		}
+		// Clamp to the viewport: a frame taller than the terminal scrolls the
+		// alt-screen on every repaint, which the eye reads as flicker.
+		if h, _, ok := termSize(int(os.Stdout.Fd())); ok && h > 1 {
+			frame = clampFrameHeight(frame, h-1)
+		}
 		if frame != prevFrame {
 			fmt.Print("\033[H")
 			for _, line := range strings.Split(frame, "\n") {
@@ -224,6 +229,19 @@ func Run(src Source) error {
 			renderFrame() // instant: re-render from cache, no re-sample
 		}
 	}
+}
+
+// clampFrameHeight truncates frame to at most maxLines lines so it fits the
+// terminal viewport without scrolling.
+func clampFrameHeight(frame string, maxLines int) string {
+	if maxLines <= 0 {
+		return frame
+	}
+	lines := strings.Split(frame, "\n")
+	if len(lines) <= maxLines {
+		return frame
+	}
+	return strings.Join(lines[:maxLines], "\n")
 }
 
 // rowIndex returns the position of sid in rows, or -1 if absent.

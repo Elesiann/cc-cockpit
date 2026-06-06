@@ -10,3 +10,8 @@ import "errors"
 func enableCharInput(fd int) (func(), error) {
 	return nil, errors.New("interactive input unsupported on this platform")
 }
+
+// termSize is unsupported off Linux; callers fall back to not clamping.
+func termSize(fd int) (rows, cols int, ok bool) {
+	return 0, 0, false
+}

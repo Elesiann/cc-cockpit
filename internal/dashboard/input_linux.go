@@ -23,3 +23,14 @@ func enableCharInput(fd int) (func(), error) {
 	}
 	return func() { _ = unix.IoctlSetTermios(fd, unix.TCSETS, old) }, nil
 }
+
+// termSize returns the terminal's row/column count for fd, or ok=false if fd is
+// not a terminal. Used to clamp the frame so it never overflows the viewport
+// (overflow scrolls the alt-screen on every repaint, which reads as flicker).
+func termSize(fd int) (rows, cols int, ok bool) {
+	ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
+	if err != nil {
+		return 0, 0, false
+	}
+	return int(ws.Row), int(ws.Col), true
+}
