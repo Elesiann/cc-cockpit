@@ -3,7 +3,6 @@ package winfocus
 import (
 	"errors"
 	"os/exec"
-	"strconv"
 	"strings"
 )
 
@@ -19,7 +18,7 @@ func Focus(b Binding) error {
 	}
 	cmd := exec.Command("powershell.exe",
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-EncodedCommand", encodePS(buildFocusScript(hwnd, b.Tab)))
+		"-EncodedCommand", encodePS(buildFocusScript(hwnd, b.TabRID)))
 	return cmd.Run()
 }
 
@@ -38,19 +37,18 @@ func validHWND(s string) bool {
 	return true
 }
 
-// buildFocusScript interpolates the (validated, numeric) hwnd and tab index into
-// a raise script that uses only managed UI Automation — no inline C# Add-Type,
-// which would invoke the C# compiler on every call and add ~half a second.
-// When tab >= 0 it first selects that tab (same Descendants+SelectionItem
-// ordering capture used), un-minimizes via WindowPattern, then SetFocus() to
-// bring the window forward.
-func buildFocusScript(hwnd string, tab int) string {
+// buildFocusScript interpolates the (validated, numeric) hwnd and tab RuntimeId
+// into a raise script that uses only managed UI Automation — no inline C#
+// Add-Type, which would invoke the C# compiler on every call and add ~half a
+// second. When tabRID is non-empty it first selects the tab whose RuntimeId
+// matches (so tab reorders/closes can't land on the wrong one), un-minimizes
+// via WindowPattern, then SetFocus() to bring the window forward.
+func buildFocusScript(hwnd, tabRID string) string {
 	tabBlock := ""
-	if tab >= 0 {
+	if tabRID != "" {
 		tabBlock = `
 $si=[System.Windows.Automation.SelectionItemPattern]::Pattern
-$idx=0
-foreach($e in $el.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($idx -eq ` + strconv.Itoa(tab) + `){ try{$s.Select()}catch{}; break }; $idx++ } }
+foreach($e in $el.FindAll($scope,$cond)){ if(($e.GetRuntimeId() -join '.') -eq '` + tabRID + `'){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ try{$s.Select()}catch{} }; break } }
 `
 	}
 	return `$ErrorActionPreference='SilentlyContinue'

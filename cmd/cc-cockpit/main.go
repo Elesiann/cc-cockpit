@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -729,16 +728,12 @@ func runBindWindow(args []string) int {
 // debugging; `watch` calls winfocus.Focus in-process.
 func runFocusWindow(args []string) int {
 	if len(args) != 1 {
-		die("focus-window", "usage: focus-window <hwnd[:tab]>")
+		die("focus-window", "usage: focus-window <hwnd[:tabRID]>")
 	}
-	hwnd, tabStr, hasTab := strings.Cut(args[0], ":")
-	b := winfocus.Binding{HWND: hwnd, Tab: -1}
+	hwnd, rid, hasTab := strings.Cut(args[0], ":")
+	b := winfocus.Binding{HWND: hwnd}
 	if hasTab {
-		n, err := strconv.Atoi(tabStr)
-		if err != nil {
-			die("focus-window", "invalid tab index %q", tabStr)
-		}
-		b.Tab = n
+		b.TabRID = rid
 	}
 	if err := winfocus.Focus(b); err != nil {
 		die("focus-window", "%v", err)

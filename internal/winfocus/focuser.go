@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -46,7 +45,11 @@ func (f *Focuser) Focus(b Binding) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	_, err := io.WriteString(f.stdin, hwnd+" "+strconv.Itoa(b.Tab)+"\n")
+	line := hwnd
+	if b.TabRID != "" && validRID(b.TabRID) {
+		line += " " + b.TabRID
+	}
+	_, err := io.WriteString(f.stdin, line+"\n")
 	return err
 }
 
@@ -85,15 +88,15 @@ while($true){
   $parts=$line.Split(' ')
   $hwnd=[int64]0
   if(-not [int64]::TryParse($parts[0],[ref]$hwnd)){ continue }
-  $tab=-1
-  if($parts.Length -ge 2){ $t=0; if([int]::TryParse($parts[1],[ref]$t)){ $tab=$t } }
+  $rid=''
+  if($parts.Length -ge 2){ $rid=$parts[1] }
   $el=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$hwnd)
   if($null -eq $el){ continue }
   # FromHandle resolves a dead/reused handle to some other live window; skip
   # unless the element reports the handle we asked for, so a stale binding never
   # focuses an arbitrary window.
   if([int64]$el.Current.NativeWindowHandle -ne $hwnd){ continue }
-  if($tab -ge 0){ $idx=0; foreach($e in $el.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($idx -eq $tab){ try{$s.Select()}catch{}; break }; $idx++ } } }
+  if($rid -ne ''){ foreach($e in $el.FindAll($scope,$cond)){ if(($e.GetRuntimeId() -join '.') -eq $rid){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ try{$s.Select()}catch{} }; break } } }
   try{ $w=$el.GetCurrentPattern($wpat); if($w){ $w.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal) } }catch{}
   # Focus the active tab's terminal content (not the window/tab chrome) so the
   # keyboard goes straight to the Claude prompt.

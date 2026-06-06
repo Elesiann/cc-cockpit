@@ -27,12 +27,12 @@ func TestEncodePSRoundTrip(t *testing.T) {
 
 func TestBindingRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeBinding(dir, "sess-1", Binding{HWND: "590104", Tab: 3}); err != nil {
+	if err := writeBinding(dir, "sess-1", Binding{HWND: "590104", TabRID: "42.67196.4.142"}); err != nil {
 		t.Fatalf("writeBinding: %v", err)
 	}
 	got, ok := ReadBinding(dir, "sess-1")
-	if !ok || got.HWND != "590104" || got.Tab != 3 {
-		t.Fatalf("ReadBinding = (%+v,%v), want ({590104 3},true)", got, ok)
+	if !ok || got.HWND != "590104" || got.TabRID != "42.67196.4.142" {
+		t.Fatalf("ReadBinding = (%+v,%v), want ({590104 42.67196.4.142},true)", got, ok)
 	}
 	if _, ok := ReadBinding(dir, "missing"); ok {
 		t.Fatalf("ReadBinding for missing session should be false")
@@ -41,11 +41,11 @@ func TestBindingRoundTrip(t *testing.T) {
 
 func TestBindingRoundTripNoTab(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeBinding(dir, "s", Binding{HWND: "42", Tab: -1}); err != nil {
+	if err := writeBinding(dir, "s", Binding{HWND: "42"}); err != nil {
 		t.Fatalf("writeBinding: %v", err)
 	}
 	got, ok := ReadBinding(dir, "s")
-	if !ok || got.HWND != "42" || got.Tab != -1 {
-		t.Fatalf("ReadBinding = (%+v,%v), want ({42 -1},true)", got, ok)
+	if !ok || got.HWND != "42" || got.TabRID != "" {
+		t.Fatalf("ReadBinding = (%+v,%v), want ({42 },true)", got, ok)
 	}
 }

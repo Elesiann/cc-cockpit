@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -23,10 +22,14 @@ const (
 )
 
 // Binding is a session's resolved Windows Terminal location: the window handle
-// plus the index of its tab (Tab < 0 means "window only / tab unknown").
+// plus the UI Automation RuntimeId of its tab (dot-joined digits). A tab's
+// positional index drifts as sibling tabs open and close, so the RuntimeId —
+// stable for the element's lifetime, which is bounded by the WT process that
+// also owns the HWND — is what re-finds the right tab later. TabRID == ""
+// means "window only / tab unknown".
 type Binding struct {
-	HWND string
-	Tab  int
+	HWND   string
+	TabRID string
 }
 
 // Capture binds the current session to its Windows Terminal window+tab and
@@ -55,7 +58,7 @@ func Capture(stateHome, sessionID string) error {
 	var err error
 	for attempt := 1; attempt <= captureAttempts; attempt++ {
 		b, err = focusedWindow()
-		Debugf("capture sid=%s attempt=%d hwnd=%q tab=%d err=%v", sessionID, attempt, b.HWND, b.Tab, err)
+		Debugf("capture sid=%s attempt=%d hwnd=%q tabRID=%q err=%v", sessionID, attempt, b.HWND, b.TabRID, err)
 		if err == nil {
 			break
 		}
@@ -76,31 +79,29 @@ func focusedWindow() (Binding, error) {
 		"-EncodedCommand", encodePS(focusedScript()))
 	out, err := cmd.Output()
 	if err != nil {
-		return Binding{Tab: -1}, err
+		return Binding{}, err
 	}
 	fields := strings.Fields(strings.TrimSpace(string(out)))
 	if len(fields) == 0 || fields[0] == "" {
-		return Binding{Tab: -1}, errors.New("winfocus: focused window is not Windows Terminal")
+		return Binding{}, errors.New("winfocus: focused window is not Windows Terminal")
 	}
-	b := Binding{HWND: fields[0], Tab: -1}
-	if len(fields) >= 2 {
-		if n, e := strconv.Atoi(fields[1]); e == nil {
-			b.Tab = n
-		}
+	b := Binding{HWND: fields[0]}
+	if len(fields) >= 2 && validRID(fields[1]) {
+		b.TabRID = fields[1]
 	}
 	return b, nil
 }
 
 // writeBinding atomically records the binding at <stateHome>/windows/<sessionID>
-// as "HWND:TAB" (TAB omitted when < 0).
+// as "HWND:TABRID" (the ":TABRID" suffix omitted when the tab is unknown).
 func writeBinding(stateHome, sessionID string, b Binding) error {
 	dir := filepath.Join(stateHome, sidecarDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
 	val := b.HWND
-	if b.Tab >= 0 {
-		val += ":" + strconv.Itoa(b.Tab)
+	if b.TabRID != "" {
+		val += ":" + b.TabRID
 	}
 	path := filepath.Join(dir, sessionID)
 	tmp := path + ".tmp"
@@ -120,12 +121,10 @@ func ReadBinding(stateHome, sessionID string) (Binding, bool) {
 	if s == "" {
 		return Binding{}, false
 	}
-	hwnd, tabStr, hasTab := strings.Cut(s, ":")
-	b := Binding{HWND: hwnd, Tab: -1}
-	if hasTab {
-		if n, e := strconv.Atoi(tabStr); e == nil {
-			b.Tab = n
-		}
+	hwnd, rid, hasTab := strings.Cut(s, ":")
+	b := Binding{HWND: hwnd}
+	if hasTab && validRID(rid) {
+		b.TabRID = rid
 	}
 	return b, true
 }
@@ -161,8 +160,24 @@ $hwnd=[int64]$top.Current.NativeWindowHandle
 $si=[System.Windows.Automation.SelectionItemPattern]::Pattern
 $cond=[System.Windows.Automation.Condition]::TrueCondition
 $scope=[System.Windows.Automation.TreeScope]::Descendants
-$tab=-1; $idx=0
-foreach($e in $top.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($s.Current.IsSelected){$tab=$idx}; $idx++ } }
-[Console]::Out.Write($hwnd.ToString()+' '+$tab.ToString()); exit 0
+$rid=''
+foreach($e in $top.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s -and $s.Current.IsSelected){ $rid=($e.GetRuntimeId() -join '.'); break } }
+[Console]::Out.Write($hwnd.ToString()+' '+$rid); exit 0
 `
+}
+
+// validRID accepts only a non-empty run of ASCII digits and dots — the shape of
+// a dot-joined UIA RuntimeId. It is interpolated into a PowerShell string
+// comparison, so this both rejects garbage and prevents script injection via
+// the sidecar.
+func validRID(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if (s[i] < '0' || s[i] > '9') && s[i] != '.' {
+			return false
+		}
+	}
+	return true
 }
