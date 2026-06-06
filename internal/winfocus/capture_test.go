@@ -71,6 +71,7 @@ func TestCaptureStable(t *testing.T) {
 		{"stable immediately", []rd{{b: A}, {b: A}}, A, true, nil},
 		{"transient error then stable", []rd{{err: errRead}, {b: A}, {b: A}}, A, true, nil},
 		{"focus moved then settled", []rd{{b: A}, {b: B}, {b: B}}, B, true, nil},
+		{"error mid-streak holds it", []rd{{b: A}, {err: errRead}, {b: A}}, A, true, nil},
 		{"never settles", []rd{{b: A}, {b: B}, {b: A}, {b: B}}, Binding{}, false, nil},
 		{"all errors", []rd{{err: errRead}, {err: errRead}, {err: errRead}, {err: errRead}}, Binding{}, false, errRead},
 	}
