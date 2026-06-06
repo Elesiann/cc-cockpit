@@ -72,4 +72,16 @@ func TestBuildFocusScriptSelectsTabByRID(t *testing.T) {
 	if !strings.Contains(s, "GetRuntimeId() -join '.') -eq '42.67196.4.142'") {
 		t.Fatalf("tab RuntimeId not interpolated into a match:\n%s", s)
 	}
+	// Fail closed: a stale/absent RID must exit before the window/TermControl
+	// focus, never fall through to the active sibling tab.
+	if !strings.Contains(s, "if(-not $found){ exit 2 }") {
+		t.Fatalf("missing fail-closed guard for an unmatched tab RID:\n%s", s)
+	}
+}
+
+func TestFocuserLoopFailsClosedOnStaleRID(t *testing.T) {
+	s := focuserLoopScript()
+	if !strings.Contains(s, "if(-not $found){ continue }") {
+		t.Fatalf("warm focuser must skip a line whose tab RID matches no live tab:\n%s", s)
+	}
 }

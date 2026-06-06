@@ -53,9 +53,15 @@ func validHWND(s string) bool {
 func buildFocusScript(hwnd, tabRID string) string {
 	tabBlock := ""
 	if tabRID != "" {
+		// Fail closed: if the bound tab's RuntimeId isn't present (tab closed,
+		// stale sidecar, UIA elements recreated), exit WITHOUT focusing rather
+		// than fall through and SetFocus on whatever sibling tab is active —
+		// raising the wrong session is worse than doing nothing.
 		tabBlock = `
 $si=[System.Windows.Automation.SelectionItemPattern]::Pattern
-foreach($e in $el.FindAll($scope,$cond)){ if(($e.GetRuntimeId() -join '.') -eq '` + tabRID + `'){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ try{$s.Select()}catch{} }; break } }
+$found=$false
+foreach($e in $el.FindAll($scope,$cond)){ if(($e.GetRuntimeId() -join '.') -eq '` + tabRID + `'){ $found=$true; $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ try{$s.Select()}catch{} }; break } }
+if(-not $found){ exit 2 }
 `
 	}
 	return `$ErrorActionPreference='SilentlyContinue'

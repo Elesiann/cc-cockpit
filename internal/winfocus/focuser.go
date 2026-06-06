@@ -115,7 +115,13 @@ while($true){
   # unless the element reports the handle we asked for, so a stale binding never
   # focuses an arbitrary window.
   if([int64]$el.Current.NativeWindowHandle -ne $hwnd){ continue }
-  if($rid -ne ''){ foreach($e in $el.FindAll($scope,$cond)){ if(($e.GetRuntimeId() -join '.') -eq $rid){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ try{$s.Select()}catch{} }; break } } }
+  # Fail closed: a non-empty RID that no live tab matches means the binding is
+  # stale — skip this line rather than focus whatever sibling tab is active.
+  if($rid -ne ''){
+    $found=$false
+    foreach($e in $el.FindAll($scope,$cond)){ if(($e.GetRuntimeId() -join '.') -eq $rid){ $found=$true; $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ try{$s.Select()}catch{} }; break } }
+    if(-not $found){ continue }
+  }
   try{ $w=$el.GetCurrentPattern($wpat); if($w){ $w.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal) } }catch{}
   # Focus the active tab's terminal content (not the window/tab chrome) so the
   # keyboard goes straight to the Claude prompt.
