@@ -96,7 +96,9 @@ func TestAggregateSource_HeaderName_WithFilter(t *testing.T) {
 }
 
 func TestAggregateSource_HeaderName_ShowsNonDefaultSort(t *testing.T) {
-	a := AggregateSource{Sort: SortAttention}
+	defer func(prev string) { ActiveSort = prev }(ActiveSort)
+	ActiveSort = SortAttention
+	a := AggregateSource{}
 	got := a.HeaderName(make([]TaggedState, 3))
 	if got != "watch · 3 workspace(s) · sort=attention" {
 		t.Errorf("header: got %q", got)

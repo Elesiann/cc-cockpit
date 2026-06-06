@@ -106,19 +106,28 @@ func renderMultiHeader(samples []TaggedState, title string) string {
 type activeRow struct {
 	sid  string
 	ws   string
+	home string // state dir, for resolving the session's window sidecar
 	sess *state.Session
 }
 
-func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
+// activeRowsOrdered returns the non-ended sessions across all samples in the
+// same order the active table renders them. Shared by the renderer and the
+// interactive selector so a row index means the same thing in both.
+func activeRowsOrdered(samples []TaggedState, now time.Time) []activeRow {
 	var active []activeRow
 	for _, s := range samples {
 		for sid, sess := range s.State.Sessions {
 			if sess.Status != state.StatusEnded {
-				active = append(active, activeRow{sid, s.Name, sess})
+				active = append(active, activeRow{sid: sid, ws: s.Name, home: s.StateHome, sess: sess})
 			}
 		}
 	}
 	sortActiveRows(active, now)
+	return active
+}
+
+func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[string]SessionMeta, recaps map[string]string, agents map[string]subagent.Rollup) string {
+	active := activeRowsOrdered(samples, now)
 	if len(active) == 0 {
 		// Distinguish "hooks installed, just no sessions yet" from "no state
 		// dirs at all" (the latter usually means hooks haven't been installed,
@@ -160,8 +169,31 @@ func renderMultiActiveTable(samples []TaggedState, now time.Time, metas map[stri
 		}
 	}
 	_ = tw.Flush()
-	table := colorizeDataRowsWithHeader(b.String(), sids, metas)
+	table := markSelectedRow(b.String(), sids, 2)
+	table = colorizeDataRowsWithHeader(table, sids, metas)
 	return insertSessionHints(table, sids, sessions, now, recaps, agents, recapSids, 2)
+}
+
+// markSelectedRow swaps the two-space indent of the row matching Selected for a
+// "▸ " cursor. Done before colorize/hints (so indices still line up with sids)
+// and width-neutral: "▸ " is two runes, exactly like "  ", so tabwriter's
+// alignment is preserved.
+func markSelectedRow(table string, sids []string, preambleLines int) string {
+	if Selected == "" {
+		return table
+	}
+	lines := strings.Split(table, "\n")
+	for i, sid := range sids {
+		if sid != Selected {
+			continue
+		}
+		idx := i + preambleLines
+		if idx >= 0 && idx < len(lines) && strings.HasPrefix(lines[idx], "  ") {
+			lines[idx] = "▸ " + lines[idx][2:]
+		}
+		break
+	}
+	return strings.Join(lines, "\n")
 }
 
 func sortActiveRows(rows []activeRow, now time.Time) {
@@ -269,14 +301,22 @@ func renderMultiEndedFooter(samples []TaggedState, now time.Time) string {
 // renderWatchFooter is the cheatsheet for `cc-cockpit watch`. Lists the verbs
 // that work from any terminal plus the exit hint and the `?` legend.
 func renderWatchFooter() string {
-	return strings.Join([]string{
+	lines := []string{
 		"─── commands ─── (in any terminal, prefix `cc-cockpit`)",
 		"  end <prefix>               end a session in dashboard state",
 		"  end all-non-ended --yes    nuke every non-ended session",
 		"  reap [--older-than DUR]    sweep stale sessions (default: idle > 1h)",
 		"  Ctrl-C                     exit watch",
 		"  legend: 🔧 tool 🤔 think ⏳ proc ⏸️ wait ✅ done 💤 idle  ? = stale 15m+",
-	}, "\n")
+	}
+	// Selected is set only in interactive mode; surface the key bindings then.
+	if Selected != "" {
+		lines = append(lines, "  ↑/↓ select · Enter focus window · q quit")
+	}
+	if StatusLine != "" {
+		lines = append(lines, "  "+StatusLine)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func glyph(status string) string {

@@ -1,0 +1,133 @@
+package winfocus
+
+import (
+	"errors"
+	"io"
+	"os/exec"
+	"strings"
+	"sync"
+)
+
+// ErrClosed is returned by Focus after the Focuser has been closed, so callers
+// can tell a shutdown apart from a real focus failure and skip the cold-path
+// fallback.
+var ErrClosed = errors.New("winfocus: focuser closed")
+
+// Focuser keeps a warm powershell.exe with UI Automation already loaded and
+// drives it over stdin, so each focus is a pipe write instead of a fresh
+// ~1s powershell + assembly cold start. It lives for the duration of an
+// interactive watch and is killed on Close.
+type Focuser struct {
+	mu     sync.Mutex
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	closed bool
+}
+
+// NewFocuser spawns the warm helper. The caller must Close it.
+func NewFocuser() (*Focuser, error) {
+	cmd := exec.Command("powershell.exe",
+		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+		"-EncodedCommand", encodePS(focuserLoopScript()))
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	started := false
+	// On any failure before we hand ownership to the Focuser, close the pipe so
+	// its fd doesn't leak.
+	defer func() {
+		if !started {
+			_ = stdin.Close()
+		}
+	}()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	started = true
+	return &Focuser{cmd: cmd, stdin: stdin}, nil
+}
+
+// Focus sends one binding to the warm helper. Returns quickly: the actual raise
+// happens in the helper. Safe for concurrent callers.
+func (f *Focuser) Focus(b Binding) error {
+	if f == nil {
+		return errors.New("winfocus: nil focuser")
+	}
+	hwnd := strings.TrimSpace(b.HWND)
+	if !validHWND(hwnd) {
+		return errors.New("winfocus: invalid HWND")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed {
+		return ErrClosed
+	}
+	line := hwnd
+	if b.TabRID != "" && validRID(b.TabRID) {
+		line += " " + b.TabRID
+	}
+	_, err := io.WriteString(f.stdin, line+"\n")
+	return err
+}
+
+// Close stops the helper (closing stdin ends its read loop) and reaps it.
+func (f *Focuser) Close() error {
+	if f == nil {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = true
+	if f.stdin != nil {
+		_ = f.stdin.Close()
+	}
+	if f.cmd != nil && f.cmd.Process != nil {
+		go func(c *exec.Cmd) { _ = c.Wait() }(f.cmd)
+	}
+	return nil
+}
+
+// focuserLoopScript reads "<hwnd> <tab>" lines from stdin and focuses each via
+// managed UI Automation. Assemblies are loaded once, up front, so per-line work
+// is just the UIA calls.
+func focuserLoopScript() string {
+	return `$ErrorActionPreference='SilentlyContinue'
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$si=[System.Windows.Automation.SelectionItemPattern]::Pattern
+$wpat=[System.Windows.Automation.WindowPattern]::Pattern
+$cond=[System.Windows.Automation.Condition]::TrueCondition
+$scope=[System.Windows.Automation.TreeScope]::Descendants
+while($true){
+  $line=[Console]::In.ReadLine()
+  if($null -eq $line){ break }
+  $line=$line.Trim()
+  if($line -eq ''){ continue }
+  $parts=$line.Split(' ')
+  $hwnd=[int64]0
+  if(-not [int64]::TryParse($parts[0],[ref]$hwnd)){ continue }
+  $rid=''
+  if($parts.Length -ge 2){ $rid=$parts[1] }
+  $el=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$hwnd)
+  if($null -eq $el){ continue }
+  # FromHandle resolves a dead/reused handle to some other live window; skip
+  # unless the element reports the handle we asked for, so a stale binding never
+  # focuses an arbitrary window.
+  if([int64]$el.Current.NativeWindowHandle -ne $hwnd){ continue }
+  # Fail closed: a non-empty RID that no live tab matches means the binding is
+  # stale — skip this line rather than focus whatever sibling tab is active.
+  if($rid -ne ''){
+    $found=$false
+    foreach($e in $el.FindAll($scope,$cond)){ if(($e.GetRuntimeId() -join '.') -eq $rid){ $found=$true; $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ try{$s.Select()}catch{} }; break } }
+    if(-not $found){ continue }
+  }
+  try{ $w=$el.GetCurrentPattern($wpat); if($w){ $w.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal) } }catch{}
+  # Focus the active tab's terminal content (not the window/tab chrome) so the
+  # keyboard goes straight to the Claude prompt.
+  $tc=$null
+  foreach($e in $el.FindAll($scope,$cond)){ if($e.Current.ClassName -eq 'TermControl' -and -not $e.Current.IsOffscreen){ $tc=$e; break } }
+  if($null -ne $tc){ try{$tc.SetFocus()}catch{} } else { try{$el.SetFocus()}catch{} }
+}
+`
+}

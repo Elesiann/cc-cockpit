@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"github.com/elesiann/cc-cockpit/internal/state"
+	"github.com/elesiann/cc-cockpit/internal/subagent"
+	"github.com/elesiann/cc-cockpit/internal/winfocus"
 )
 
 // Run drives the dashboard loop until SIGINT/SIGTERM/SIGHUP/SIGQUIT. The
@@ -27,6 +30,39 @@ func Run(src Source) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(sigCh)
 
+	// Interactive selection (arrow keys → focus a session's window) is only
+	// meaningful where window focus works: WSL + Windows Terminal. Elsewhere
+	// watch stays exactly as it was — render-only. If stdin isn't a terminal,
+	// enableCharInput fails and we silently fall back to non-interactive.
+	var keyCh chan key
+	var focuser *winfocus.Focuser
+	if winfocus.Enabled() {
+		if restore, err := enableCharInput(int(os.Stdin.Fd())); err == nil {
+			defer restore()
+			keyCh = make(chan key, 16)
+			go readKeys(os.Stdin, keyCh)
+			// The cursor tracks a session by id, so it survives reorders — but
+			// the `activity` order re-ranks on every tick as timers advance,
+			// which makes the list churn under the cursor. Demote only that one
+			// to the stable started order; `attention` (re-ranks only on status
+			// changes) is the order users most want here, so it's honored.
+			if ActiveSort == SortActivity {
+				ActiveSort = SortStarted
+			}
+			// Warm focus helper: keeps powershell + UIA loaded so each Enter is
+			// a pipe write, not a ~1s cold start. Best-effort; nil falls back
+			// to a cold one-shot per focus.
+			if fc, ferr := winfocus.NewFocuser(); ferr == nil {
+				focuser = fc
+				defer focuser.Close()
+			}
+		}
+	}
+	// Selection tracks the session id, not a row index: when a new snapshot
+	// reorders rows or adds/removes sessions, the cursor stays on the same
+	// session (and Enter keeps targeting it) instead of jumping.
+	var selectedSID string
+
 	home, _ := os.UserHomeDir()
 	notify := resolveNotifier()
 	if notify.describe != "" && notify.describe != "none" {
@@ -36,46 +72,127 @@ func Run(src Source) error {
 		fmt.Fprintf(os.Stderr, "cc-cockpit: desktop notifications via %s\n", notify.describe)
 	}
 
-	// Seed bell baselines from disk (or current max seq, if first run) so
-	// historical events don't replay on boot. One entry per stateHome.
-	lastBellSeq := make(map[string]int64)
-	if samples, err := src.Sample(); err == nil {
-		for _, s := range samples {
-			lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
-		}
+	// A sampler goroutine does the expensive src.Sample() + reduce + derive off
+	// the input path, so key handling never blocks on it (with many workspaces a
+	// sample can take long enough to make navigation feel laggy). It publishes a
+	// snapshot; the main loop only renders and rings the bell.
+	type snapshot struct {
+		samples   []TaggedState
+		title     string
+		stageErr  string
+		metas     map[string]SessionMeta
+		recaps    map[string]string
+		agents    map[string]subagent.Rollup
+		attention int
+		repo      string
+		task      string
 	}
+	snapCh := make(chan snapshot, 1)
+	stop := make(chan struct{})
+	defer close(stop)
 
-	var prevFrame string
-	recaps := newRecapCache()
-	metas := NewSessionMetaLoader()
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	go func() {
+		recaps := newRecapCache()
+		metas := NewSessionMetaLoader()
+		// Bell baselines seed to the current max seq on first sight of a
+		// workspace, so historical events don't replay as attention on boot.
+		lastBellSeq := make(map[string]int64)
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
 
-	for {
-		var stageErr string
-		samples, err := src.Sample()
-		if err != nil {
-			stageErr = "snapshot: " + err.Error()
+		take := func() snapshot {
+			samples, err := src.Sample()
+			snap := snapshot{samples: samples}
+			if err != nil {
+				snap.stageErr = "snapshot: " + err.Error()
+			}
+			for _, s := range samples {
+				if _, seen := lastBellSeq[s.StateHome]; !seen {
+					lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
+				}
+			}
+			snap.title = src.HeaderName(samples)
+			snap.metas = metas.Load(home)
+			snap.recaps = recaps.load(samples)
+			snap.agents = loadSubagentRollups(samples, time.Now())
+			for _, s := range samples {
+				info := computeBell(s.Raw, lastBellSeq[s.StateHome])
+				if info.NewAttention > 0 {
+					snap.attention += info.NewAttention
+					if snap.repo == "" {
+						snap.repo, snap.task = pickAttentionLabels(s.State, snap.metas)
+					}
+				}
+				if info.MaxSeq > lastBellSeq[s.StateHome] {
+					lastBellSeq[s.StateHome] = info.MaxSeq
+					writeAtomic(filepath.Join(s.StateHome, "last_bell_seq"),
+						[]byte(strconv.FormatInt(info.MaxSeq, 10)+"\n"))
+				}
+			}
+			return snap
 		}
-
-		// Seed bell baselines for workspaces that appeared after Run started.
-		// Without this we'd ring on the historical backlog.
-		for _, s := range samples {
-			if _, seen := lastBellSeq[s.StateHome]; !seen {
-				lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
+		emit := func(s snapshot) bool {
+			select {
+			case snapCh <- s:
+				return true
+			case <-stop:
+				return false
 			}
 		}
+		if !emit(take()) {
+			return
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if !emit(take()) {
+					return
+				}
+			}
+		}
+	}()
 
+	// Latest snapshot, cached so key presses re-render without re-sampling.
+	var (
+		prevFrame    string
+		samples      []TaggedState
+		title        string
+		stageErr     string
+		sessionMetas map[string]SessionMeta
+		recapTexts   map[string]string
+		agentRollups map[string]subagent.Rollup
+		rows         []activeRow
+	)
+
+	// renderFrame rebuilds and paints from the cached snapshot and the current
+	// selection. Cheap: no disk I/O. rows and Selected come from the same
+	// activeRowsOrdered(samples, now) that RenderMulti uses internally, so the ▸
+	// marker and the Enter target are always the same session.
+	renderFrame := func() {
 		now := time.Now()
-		sessionMetas := metas.Load(home)
-		recapTexts := recaps.load(samples)
-		agentRollups := loadSubagentRollups(samples, now)
-		frame := RenderMulti(samples, src.HeaderName(samples), now, sessionMetas, recapTexts, agentRollups)
+		rows = activeRowsOrdered(samples, now)
+		if keyCh != nil && len(rows) > 0 {
+			// Default to the first row, and re-anchor if the selected session
+			// disappeared (ended/reaped).
+			if selectedSID == "" || rowIndex(rows, selectedSID) < 0 {
+				selectedSID = rows[0].sid
+			}
+			Selected = selectedSID
+		} else {
+			Selected = ""
+		}
+		frame := RenderMulti(samples, title, now, sessionMetas, recapTexts, agentRollups)
 		if stageErr != "" {
 			frame = "⚠ DASHBOARD STAGE FAILED: " + stageErr + " — displayed state may be stale.\n" +
 				"────────────────────────────────────────────────────────────────\n" + frame
 		}
-
+		// Clamp to the viewport: a frame taller than the terminal scrolls the
+		// alt-screen on every repaint, which the eye reads as flicker.
+		if h, _, ok := termSize(int(os.Stdout.Fd())); ok && h > 1 {
+			frame = clampFrameHeight(frame, h-1)
+		}
 		if frame != prevFrame {
 			fmt.Print("\033[H")
 			for _, line := range strings.Split(frame, "\n") {
@@ -84,36 +201,91 @@ func Run(src Source) error {
 			fmt.Print("\033[J")
 			prevFrame = frame
 		}
+	}
 
-		// Bell + desktop notification. Aggregate NewAttention across
-		// sources so one toast covers a multi-workspace burst.
-		totalAttention := 0
-		var attentionRepo, attentionTask string
-		for _, s := range samples {
-			info := computeBell(s.Raw, lastBellSeq[s.StateHome])
-			if info.NewAttention > 0 {
-				totalAttention += info.NewAttention
-				if attentionRepo == "" {
-					attentionRepo, attentionTask = pickAttentionLabels(s.State, sessionMetas)
-				}
-			}
-			if info.MaxSeq > lastBellSeq[s.StateHome] {
-				lastBellSeq[s.StateHome] = info.MaxSeq
-				writeAtomic(filepath.Join(s.StateHome, "last_bell_seq"),
-					[]byte(strconv.FormatInt(info.MaxSeq, 10)+"\n"))
-			}
-		}
-		if totalAttention > 0 {
-			fmt.Print("\a")
-			notify.Notify(buildNotifyMessage(totalAttention, attentionRepo, attentionTask))
-		}
-
+	for {
 		select {
 		case <-sigCh:
 			return nil
-		case <-ticker.C:
+		case snap := <-snapCh:
+			samples = snap.samples
+			title = snap.title
+			stageErr = snap.stageErr
+			sessionMetas = snap.metas
+			recapTexts = snap.recaps
+			agentRollups = snap.agents
+			renderFrame()
+			if snap.attention > 0 {
+				fmt.Print("\a")
+				notify.Notify(buildNotifyMessage(snap.attention, snap.repo, snap.task))
+			}
+		case k := <-keyCh: // nil channel when non-interactive: this case never fires
+			switch k {
+			case keyUp:
+				if i := rowIndex(rows, selectedSID); i > 0 {
+					selectedSID = rows[i-1].sid
+				}
+				StatusLine = ""
+			case keyDown:
+				if i := rowIndex(rows, selectedSID); i >= 0 && i < len(rows)-1 {
+					selectedSID = rows[i+1].sid
+				}
+				StatusLine = ""
+			case keyEnter:
+				if i := rowIndex(rows, selectedSID); i >= 0 {
+					focusRow(focuser, rows[i])
+				}
+			case keyQuit:
+				return nil
+			}
+			renderFrame() // instant: re-render from cache, no re-sample
 		}
 	}
+}
+
+// clampFrameHeight truncates frame to at most maxLines lines so it fits the
+// terminal viewport without scrolling.
+func clampFrameHeight(frame string, maxLines int) string {
+	if maxLines <= 0 {
+		return frame
+	}
+	lines := strings.Split(frame, "\n")
+	if len(lines) <= maxLines {
+		return frame
+	}
+	return strings.Join(lines[:maxLines], "\n")
+}
+
+// rowIndex returns the position of sid in rows, or -1 if absent.
+func rowIndex(rows []activeRow, sid string) int {
+	for i := range rows {
+		if rows[i].sid == sid {
+			return i
+		}
+	}
+	return -1
+}
+
+// focusRow raises the Windows Terminal window bound to the selected session.
+// The actual focus call is slow (cold powershell.exe), so it runs in a
+// goroutine to keep the dashboard responsive; StatusLine reports the attempt.
+func focusRow(f *winfocus.Focuser, r activeRow) {
+	b, ok := winfocus.ReadBinding(r.home, r.sid)
+	if !ok {
+		StatusLine = "no window bound for " + shortSID(r.sid) + " — start a fresh claude session under WSL+WT"
+		return
+	}
+	StatusLine = "→ focusing " + sessionRepoLabel(r.sess) + " (" + shortSID(r.sid) + ")"
+	go func() {
+		if f != nil {
+			// On a clean warm-path success, or a shutdown race, don't fall
+			// through to the cold one-shot.
+			if err := f.Focus(b); err == nil || errors.Is(err, winfocus.ErrClosed) {
+				return
+			}
+		}
+		_ = winfocus.Focus(b) // fallback: cold one-shot
+	}()
 }
 
 // loadBellSeq returns the persisted bell baseline for stateHome, falling back
