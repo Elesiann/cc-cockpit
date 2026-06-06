@@ -31,6 +31,23 @@ func TestBuildFocusScriptInterpolatesHWND(t *testing.T) {
 	}
 }
 
+func TestBuildFocusScriptGuardsStaleHandle(t *testing.T) {
+	s := buildFocusScript("590104", -1)
+	// FromHandle resolves a dead handle to another live window, so the script
+	// must reject any element whose reported handle differs from the requested
+	// one before acting.
+	if !strings.Contains(s, "NativeWindowHandle -ne 590104") {
+		t.Fatalf("missing stale-handle guard:\n%s", s)
+	}
+}
+
+func TestFocuserLoopGuardsStaleHandle(t *testing.T) {
+	s := focuserLoopScript()
+	if !strings.Contains(s, "NativeWindowHandle -ne $hwnd") {
+		t.Fatalf("warm focuser missing stale-handle guard:\n%s", s)
+	}
+}
+
 func TestBuildFocusScriptSelectsTab(t *testing.T) {
 	s := buildFocusScript("590104", 3)
 	if !strings.Contains(s, "SelectionItemPattern") {

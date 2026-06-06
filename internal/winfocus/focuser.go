@@ -89,6 +89,10 @@ while($true){
   if($parts.Length -ge 2){ $t=0; if([int]::TryParse($parts[1],[ref]$t)){ $tab=$t } }
   $el=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$hwnd)
   if($null -eq $el){ continue }
+  # FromHandle resolves a dead/reused handle to some other live window; skip
+  # unless the element reports the handle we asked for, so a stale binding never
+  # focuses an arbitrary window.
+  if([int64]$el.Current.NativeWindowHandle -ne $hwnd){ continue }
   if($tab -ge 0){ $idx=0; foreach($e in $el.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($idx -eq $tab){ try{$s.Select()}catch{}; break }; $idx++ } } }
   try{ $w=$el.GetCurrentPattern($wpat); if($w){ $w.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal) } }catch{}
   # Focus the active tab's terminal content (not the window/tab chrome) so the

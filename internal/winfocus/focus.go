@@ -60,7 +60,11 @@ $cond=[System.Windows.Automation.Condition]::TrueCondition
 $scope=[System.Windows.Automation.TreeScope]::Descendants
 $h=[IntPtr][int64]` + hwnd + `
 $el=[System.Windows.Automation.AutomationElement]::FromHandle($h)
-if(-not $el){ exit 1 }` + tabBlock + `
+if(-not $el){ exit 1 }
+# FromHandle silently resolves a dead/reused handle to some other live window,
+# so verify the element actually reports the handle we asked for before acting —
+# otherwise a stale binding focuses an arbitrary window.
+if([int64]$el.Current.NativeWindowHandle -ne ` + hwnd + `){ exit 1 }` + tabBlock + `
 try{ $wp=$el.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern); if($wp){ $wp.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal) } }catch{}
 # Focus the active tab's terminal content so the keyboard goes to the prompt.
 $tc=$null
