@@ -39,9 +39,17 @@ func Run(src Source) error {
 			defer restore()
 			keyCh = make(chan key, 16)
 			go readKeys(os.Stdin, keyCh)
+			// A list that reshuffles under the cursor is unnavigable, so the
+			// interactive selector pins to the stable started order (StartedAt
+			// is fixed per session) instead of activity/attention, which
+			// re-rank as time passes.
+			ActiveSort = SortStarted
 		}
 	}
-	selIdx := 0
+	// Selection tracks the session id, not a row index: when a new snapshot
+	// reorders rows or adds/removes sessions, the cursor stays on the same
+	// session (and Enter keeps targeting it) instead of jumping.
+	var selectedSID string
 
 	home, _ := os.UserHomeDir()
 	notify := resolveNotifier()
@@ -153,14 +161,13 @@ func Run(src Source) error {
 	renderFrame := func() {
 		now := time.Now()
 		rows = activeRowsOrdered(samples, now)
-		if selIdx >= len(rows) {
-			selIdx = len(rows) - 1
-		}
-		if selIdx < 0 {
-			selIdx = 0
-		}
 		if keyCh != nil && len(rows) > 0 {
-			Selected = rows[selIdx].sid
+			// Default to the first row, and re-anchor if the selected session
+			// disappeared (ended/reaped).
+			if selectedSID == "" || rowIndex(rows, selectedSID) < 0 {
+				selectedSID = rows[0].sid
+			}
+			Selected = selectedSID
 		} else {
 			Selected = ""
 		}
@@ -198,18 +205,18 @@ func Run(src Source) error {
 		case k := <-keyCh: // nil channel when non-interactive: this case never fires
 			switch k {
 			case keyUp:
-				if selIdx > 0 {
-					selIdx--
+				if i := rowIndex(rows, selectedSID); i > 0 {
+					selectedSID = rows[i-1].sid
 				}
 				StatusLine = ""
 			case keyDown:
-				if selIdx < len(rows)-1 {
-					selIdx++
+				if i := rowIndex(rows, selectedSID); i >= 0 && i < len(rows)-1 {
+					selectedSID = rows[i+1].sid
 				}
 				StatusLine = ""
 			case keyEnter:
-				if len(rows) > 0 {
-					focusRow(rows[selIdx])
+				if i := rowIndex(rows, selectedSID); i >= 0 {
+					focusRow(rows[i])
 				}
 			case keyQuit:
 				return nil
@@ -217,6 +224,16 @@ func Run(src Source) error {
 			renderFrame() // instant: re-render from cache, no re-sample
 		}
 	}
+}
+
+// rowIndex returns the position of sid in rows, or -1 if absent.
+func rowIndex(rows []activeRow, sid string) int {
+	for i := range rows {
+		if rows[i].sid == sid {
+			return i
+		}
+	}
+	return -1
 }
 
 // focusRow raises the Windows Terminal window bound to the selected session.
