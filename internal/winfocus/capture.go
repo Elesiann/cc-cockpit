@@ -25,7 +25,7 @@ const markerSettleDelay = 250 * time.Millisecond
 // Automation reads it; restamping on each attempt eventually catches a quiet
 // moment. retryDelay spaces the attempts.
 const (
-	captureAttempts = 6
+	captureAttempts = 4
 	retryDelay      = 400 * time.Millisecond
 )
 
@@ -54,6 +54,13 @@ func Capture(stateHome, sessionID, pts string) error {
 		Debugf("capture skip: enabled=%v sid=%q", Enabled(), sessionID)
 		return nil
 	}
+	// Idempotent: once a session is bound, never re-stamp. SessionStart can
+	// fire again (resume, etc.); re-capturing would flash the marker in the
+	// terminal each time. Delete the sidecar to force a re-bind.
+	if _, ok := ReadBinding(stateHome, sessionID); ok {
+		Debugf("capture sid=%s: already bound, skipping", sessionID)
+		return nil
+	}
 	if pts == "" {
 		pts = FindSessionPTS()
 	}
@@ -69,7 +76,10 @@ func Capture(stateHome, sessionID, pts string) error {
 	// it. Retry because at SessionStart Claude's repaint can wipe the marker
 	// before UI Automation reads it; each attempt re-stamps a fresh marker.
 	for attempt := 1; attempt <= captureAttempts; attempt++ {
-		if err := writeToPTS(pts, "\r"+marker); err != nil {
+		// Conceal the marker (SGR 8) so that even if the clear misses — Claude
+		// may move the cursor between stamp and clear — no readable text is
+		// left on screen. UIA TextPattern still reads the characters.
+		if err := writeToPTS(pts, "\r\033[8m"+marker+"\033[0m"); err != nil {
 			return err
 		}
 		time.Sleep(markerSettleDelay)
