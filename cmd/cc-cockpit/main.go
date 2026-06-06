@@ -675,20 +675,24 @@ func runHook(args []string) int {
 // focus feature won't work for this session. No-op outside WSL + WT.
 func maybeBindWindow(sid, stateHome string) {
 	if !winfocus.Enabled() {
+		winfocus.Debugf("hook SessionStart sid=%s: winfocus disabled (WT_SESSION=%q)", sid, os.Getenv("WT_SESSION"))
 		return
 	}
 	pts := winfocus.FindSessionPTS()
 	if pts == "" {
+		winfocus.Debugf("hook SessionStart sid=%s: no pts in ancestry", sid)
 		return
 	}
 	self, err := os.Executable()
 	if err != nil {
+		winfocus.Debugf("hook SessionStart sid=%s: os.Executable err=%v", sid, err)
 		return
 	}
 	cmd := exec.Command(self, "bind-window", "--session", sid, "--state-home", stateHome, "--pts", pts)
 	// New session so the child outlives this short-lived hook process.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	_ = cmd.Start()
+	startErr := cmd.Start()
+	winfocus.Debugf("hook SessionStart sid=%s: spawned bind-window pts=%s self=%s err=%v", sid, pts, self, startErr)
 }
 
 // appendSyntheticEnd writes a SessionEnd event tagged synthetic. The reducer's

@@ -19,6 +19,15 @@ const sidecarDir = "windows"
 // covers this on its own, but a small explicit wait makes capture reliable.
 const markerSettleDelay = 250 * time.Millisecond
 
+// captureAttempts re-stamps and re-scans this many times before giving up. At
+// SessionStart Claude is actively repainting and can wipe the marker before UI
+// Automation reads it; restamping on each attempt eventually catches a quiet
+// moment. retryDelay spaces the attempts.
+const (
+	captureAttempts = 6
+	retryDelay      = 400 * time.Millisecond
+)
+
 // Capture binds the current session to its Windows Terminal window: it writes a
 // unique marker to the session's pts, asks Windows which WT window's buffer
 // contains it, and records that HWND in a sidecar under stateHome. No-op (nil)
@@ -33,26 +42,36 @@ const markerSettleDelay = 250 * time.Millisecond
 // it off the hook's critical path.
 func Capture(stateHome, sessionID, pts string) error {
 	if !Enabled() || sessionID == "" {
+		Debugf("capture skip: enabled=%v sid=%q", Enabled(), sessionID)
 		return nil
 	}
 	if pts == "" {
 		pts = FindSessionPTS()
 	}
 	if pts == "" {
+		Debugf("capture sid=%s: no controlling pts in ancestry", sessionID)
 		return errors.New("winfocus: no controlling pts found in ancestry")
 	}
 
 	marker := markerFor(sessionID)
+	var hwnd string
+	var scanErr error
 	// Order matters: stamp the marker, let it render, scan for it, THEN clear
-	// it. Clearing before the scan (an earlier bug) erased the marker before UI
-	// Automation could read it, so every scan came back empty.
-	if err := writeToPTS(pts, "\r"+marker); err != nil {
-		return err
+	// it. Retry because at SessionStart Claude's repaint can wipe the marker
+	// before UI Automation reads it; each attempt re-stamps a fresh marker.
+	for attempt := 1; attempt <= captureAttempts; attempt++ {
+		if err := writeToPTS(pts, "\r"+marker); err != nil {
+			return err
+		}
+		time.Sleep(markerSettleDelay)
+		hwnd, scanErr = scanForMarker(marker)
+		_ = writeToPTS(pts, "\r\033[2K") // best-effort clear
+		Debugf("capture sid=%s pts=%s attempt=%d hwnd=%q err=%v", sessionID, pts, attempt, hwnd, scanErr)
+		if scanErr == nil {
+			break
+		}
+		time.Sleep(retryDelay)
 	}
-	time.Sleep(markerSettleDelay)
-	hwnd, scanErr := scanForMarker(marker)
-	// Best-effort cleanup: CR + clear line. A live TUI repaints over it anyway.
-	_ = writeToPTS(pts, "\r\033[2K")
 	if scanErr != nil {
 		return scanErr
 	}
