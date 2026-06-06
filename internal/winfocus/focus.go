@@ -49,8 +49,6 @@ func buildFocusScript(hwnd string, tab int) string {
 	if tab >= 0 {
 		tabBlock = `
 $si=[System.Windows.Automation.SelectionItemPattern]::Pattern
-$cond=[System.Windows.Automation.Condition]::TrueCondition
-$scope=[System.Windows.Automation.TreeScope]::Descendants
 $idx=0
 foreach($e in $el.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($idx -eq ` + strconv.Itoa(tab) + `){ try{$s.Select()}catch{}; break }; $idx++ } }
 `
@@ -58,11 +56,16 @@ foreach($e in $el.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern(
 	return `$ErrorActionPreference='SilentlyContinue'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
+$cond=[System.Windows.Automation.Condition]::TrueCondition
+$scope=[System.Windows.Automation.TreeScope]::Descendants
 $h=[IntPtr][int64]` + hwnd + `
 $el=[System.Windows.Automation.AutomationElement]::FromHandle($h)
 if(-not $el){ exit 1 }` + tabBlock + `
 try{ $wp=$el.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern); if($wp){ $wp.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal) } }catch{}
-try{ $el.SetFocus() }catch{}
+# Focus the active tab's terminal content so the keyboard goes to the prompt.
+$tc=$null
+foreach($e in $el.FindAll($scope,$cond)){ if($e.Current.ClassName -eq 'TermControl' -and -not $e.Current.IsOffscreen){ $tc=$e; break } }
+if($null -ne $tc){ try{$tc.SetFocus()}catch{} } else { try{$el.SetFocus()}catch{} }
 exit 0
 `
 }

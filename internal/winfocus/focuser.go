@@ -91,7 +91,11 @@ while($true){
   if($null -eq $el){ continue }
   if($tab -ge 0){ $idx=0; foreach($e in $el.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($idx -eq $tab){ try{$s.Select()}catch{}; break }; $idx++ } } }
   try{ $w=$el.GetCurrentPattern($wpat); if($w){ $w.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal) } }catch{}
-  try{ $el.SetFocus() }catch{}
+  # Focus the active tab's terminal content (not the window/tab chrome) so the
+  # keyboard goes straight to the Claude prompt.
+  $tc=$null
+  foreach($e in $el.FindAll($scope,$cond)){ if($e.Current.ClassName -eq 'TermControl' -and -not $e.Current.IsOffscreen){ $tc=$e; break } }
+  if($null -ne $tc){ try{$tc.SetFocus()}catch{} } else { try{$el.SetFocus()}catch{} }
 }
 `
 }
