@@ -12,10 +12,14 @@ import (
 // to see why a bind succeeded or failed.
 var debugLogPath = filepath.Join(os.TempDir(), "cc-cockpit-winfocus.log")
 
-// Debugf appends a timestamped line to the winfocus debug log. Best-effort: any
-// error (including a read-only tmp) is swallowed — diagnostics must never break
-// the hook.
+// Debugf appends a timestamped line to the winfocus debug log, but only when
+// CC_COCKPIT_WINFOCUS_DEBUG is set — off by default so normal use doesn't
+// litter the temp dir. Best-effort: any error (including a read-only tmp) is
+// swallowed — diagnostics must never break the hook.
 func Debugf(format string, args ...any) {
+	if os.Getenv("CC_COCKPIT_WINFOCUS_DEBUG") == "" {
+		return
+	}
 	f, err := os.OpenFile(debugLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return
