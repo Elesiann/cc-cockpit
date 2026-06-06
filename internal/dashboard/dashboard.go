@@ -52,25 +52,91 @@ func Run(src Source) error {
 		fmt.Fprintf(os.Stderr, "cc-cockpit: desktop notifications via %s\n", notify.describe)
 	}
 
-	// Seed bell baselines from disk (or current max seq, if first run) so
-	// historical events don't replay on boot. One entry per stateHome.
-	lastBellSeq := make(map[string]int64)
-	if samples, err := src.Sample(); err == nil {
-		for _, s := range samples {
-			lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
-		}
+	// A sampler goroutine does the expensive src.Sample() + reduce + derive off
+	// the input path, so key handling never blocks on it (with many workspaces a
+	// sample can take long enough to make navigation feel laggy). It publishes a
+	// snapshot; the main loop only renders and rings the bell.
+	type snapshot struct {
+		samples   []TaggedState
+		title     string
+		stageErr  string
+		metas     map[string]SessionMeta
+		recaps    map[string]string
+		agents    map[string]subagent.Rollup
+		attention int
+		repo      string
+		task      string
 	}
+	snapCh := make(chan snapshot, 1)
+	stop := make(chan struct{})
+	defer close(stop)
 
-	var prevFrame string
-	recaps := newRecapCache()
-	metas := NewSessionMetaLoader()
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
+	go func() {
+		recaps := newRecapCache()
+		metas := NewSessionMetaLoader()
+		// Bell baselines seed to the current max seq on first sight of a
+		// workspace, so historical events don't replay as attention on boot.
+		lastBellSeq := make(map[string]int64)
+		t := time.NewTicker(500 * time.Millisecond)
+		defer t.Stop()
 
-	// Sample-derived state, cached between ticks. Key presses re-render from
-	// this cache without re-sampling, so navigation stays instant even when
-	// many workspaces make src.Sample() expensive — only the ticker re-samples.
+		take := func() snapshot {
+			samples, err := src.Sample()
+			snap := snapshot{samples: samples}
+			if err != nil {
+				snap.stageErr = "snapshot: " + err.Error()
+			}
+			for _, s := range samples {
+				if _, seen := lastBellSeq[s.StateHome]; !seen {
+					lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
+				}
+			}
+			snap.title = src.HeaderName(samples)
+			snap.metas = metas.Load(home)
+			snap.recaps = recaps.load(samples)
+			snap.agents = loadSubagentRollups(samples, time.Now())
+			for _, s := range samples {
+				info := computeBell(s.Raw, lastBellSeq[s.StateHome])
+				if info.NewAttention > 0 {
+					snap.attention += info.NewAttention
+					if snap.repo == "" {
+						snap.repo, snap.task = pickAttentionLabels(s.State, snap.metas)
+					}
+				}
+				if info.MaxSeq > lastBellSeq[s.StateHome] {
+					lastBellSeq[s.StateHome] = info.MaxSeq
+					writeAtomic(filepath.Join(s.StateHome, "last_bell_seq"),
+						[]byte(strconv.FormatInt(info.MaxSeq, 10)+"\n"))
+				}
+			}
+			return snap
+		}
+		emit := func(s snapshot) bool {
+			select {
+			case snapCh <- s:
+				return true
+			case <-stop:
+				return false
+			}
+		}
+		if !emit(take()) {
+			return
+		}
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if !emit(take()) {
+					return
+				}
+			}
+		}
+	}()
+
+	// Latest snapshot, cached so key presses re-render without re-sampling.
 	var (
+		prevFrame    string
 		samples      []TaggedState
 		title        string
 		stageErr     string
@@ -80,8 +146,10 @@ func Run(src Source) error {
 		rows         []activeRow
 	)
 
-	// renderFrame rebuilds and paints the frame from the cached sample data and
-	// the current selection. Cheap: no disk I/O.
+	// renderFrame rebuilds and paints from the cached snapshot and the current
+	// selection. Cheap: no disk I/O. rows and Selected come from the same
+	// activeRowsOrdered(samples, now) that RenderMulti uses internally, so the ▸
+	// marker and the Enter target are always the same session.
 	renderFrame := func() {
 		now := time.Now()
 		rows = activeRowsOrdered(samples, now)
@@ -111,56 +179,22 @@ func Run(src Source) error {
 		}
 	}
 
-	// refresh re-samples every workspace, refreshes derived state, paints, and
-	// rings the bell. Runs on the ticker only.
-	refresh := func() {
-		var err error
-		samples, err = src.Sample()
-		stageErr = ""
-		if err != nil {
-			stageErr = "snapshot: " + err.Error()
-		}
-		// Seed bell baselines for workspaces that appeared after Run started.
-		for _, s := range samples {
-			if _, seen := lastBellSeq[s.StateHome]; !seen {
-				lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
-			}
-		}
-		title = src.HeaderName(samples)
-		sessionMetas = metas.Load(home)
-		recapTexts = recaps.load(samples)
-		agentRollups = loadSubagentRollups(samples, time.Now())
-		renderFrame()
-
-		// Bell + desktop notification. Aggregate NewAttention across sources so
-		// one toast covers a multi-workspace burst.
-		totalAttention := 0
-		var attentionRepo, attentionTask string
-		for _, s := range samples {
-			info := computeBell(s.Raw, lastBellSeq[s.StateHome])
-			if info.NewAttention > 0 {
-				totalAttention += info.NewAttention
-				if attentionRepo == "" {
-					attentionRepo, attentionTask = pickAttentionLabels(s.State, sessionMetas)
-				}
-			}
-			if info.MaxSeq > lastBellSeq[s.StateHome] {
-				lastBellSeq[s.StateHome] = info.MaxSeq
-				writeAtomic(filepath.Join(s.StateHome, "last_bell_seq"),
-					[]byte(strconv.FormatInt(info.MaxSeq, 10)+"\n"))
-			}
-		}
-		if totalAttention > 0 {
-			fmt.Print("\a")
-			notify.Notify(buildNotifyMessage(totalAttention, attentionRepo, attentionTask))
-		}
-	}
-
-	refresh() // initial paint
 	for {
 		select {
 		case <-sigCh:
 			return nil
+		case snap := <-snapCh:
+			samples = snap.samples
+			title = snap.title
+			stageErr = snap.stageErr
+			sessionMetas = snap.metas
+			recapTexts = snap.recaps
+			agentRollups = snap.agents
+			renderFrame()
+			if snap.attention > 0 {
+				fmt.Print("\a")
+				notify.Notify(buildNotifyMessage(snap.attention, snap.repo, snap.task))
+			}
 		case k := <-keyCh: // nil channel when non-interactive: this case never fires
 			switch k {
 			case keyUp:
@@ -181,8 +215,6 @@ func Run(src Source) error {
 				return nil
 			}
 			renderFrame() // instant: re-render from cache, no re-sample
-		case <-ticker.C:
-			refresh()
 		}
 	}
 }
