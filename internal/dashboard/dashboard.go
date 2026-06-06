@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/elesiann/cc-cockpit/internal/state"
+	"github.com/elesiann/cc-cockpit/internal/subagent"
 	"github.com/elesiann/cc-cockpit/internal/winfocus"
 )
 
@@ -66,25 +67,24 @@ func Run(src Source) error {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
-	for {
-		var stageErr string
-		samples, err := src.Sample()
-		if err != nil {
-			stageErr = "snapshot: " + err.Error()
-		}
+	// Sample-derived state, cached between ticks. Key presses re-render from
+	// this cache without re-sampling, so navigation stays instant even when
+	// many workspaces make src.Sample() expensive — only the ticker re-samples.
+	var (
+		samples      []TaggedState
+		title        string
+		stageErr     string
+		sessionMetas map[string]SessionMeta
+		recapTexts   map[string]string
+		agentRollups map[string]subagent.Rollup
+		rows         []activeRow
+	)
 
-		// Seed bell baselines for workspaces that appeared after Run started.
-		// Without this we'd ring on the historical backlog.
-		for _, s := range samples {
-			if _, seen := lastBellSeq[s.StateHome]; !seen {
-				lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
-			}
-		}
-
+	// renderFrame rebuilds and paints the frame from the cached sample data and
+	// the current selection. Cheap: no disk I/O.
+	renderFrame := func() {
 		now := time.Now()
-		// Keep the selection in range as sessions come and go, and publish the
-		// selected sid for the renderer to highlight.
-		rows := activeRowsOrdered(samples, now)
+		rows = activeRowsOrdered(samples, now)
 		if selIdx >= len(rows) {
 			selIdx = len(rows) - 1
 		}
@@ -96,16 +96,11 @@ func Run(src Source) error {
 		} else {
 			Selected = ""
 		}
-
-		sessionMetas := metas.Load(home)
-		recapTexts := recaps.load(samples)
-		agentRollups := loadSubagentRollups(samples, now)
-		frame := RenderMulti(samples, src.HeaderName(samples), now, sessionMetas, recapTexts, agentRollups)
+		frame := RenderMulti(samples, title, now, sessionMetas, recapTexts, agentRollups)
 		if stageErr != "" {
 			frame = "⚠ DASHBOARD STAGE FAILED: " + stageErr + " — displayed state may be stale.\n" +
 				"────────────────────────────────────────────────────────────────\n" + frame
 		}
-
 		if frame != prevFrame {
 			fmt.Print("\033[H")
 			for _, line := range strings.Split(frame, "\n") {
@@ -114,9 +109,31 @@ func Run(src Source) error {
 			fmt.Print("\033[J")
 			prevFrame = frame
 		}
+	}
 
-		// Bell + desktop notification. Aggregate NewAttention across
-		// sources so one toast covers a multi-workspace burst.
+	// refresh re-samples every workspace, refreshes derived state, paints, and
+	// rings the bell. Runs on the ticker only.
+	refresh := func() {
+		var err error
+		samples, err = src.Sample()
+		stageErr = ""
+		if err != nil {
+			stageErr = "snapshot: " + err.Error()
+		}
+		// Seed bell baselines for workspaces that appeared after Run started.
+		for _, s := range samples {
+			if _, seen := lastBellSeq[s.StateHome]; !seen {
+				lastBellSeq[s.StateHome] = loadBellSeq(s.StateHome, s.Raw)
+			}
+		}
+		title = src.HeaderName(samples)
+		sessionMetas = metas.Load(home)
+		recapTexts = recaps.load(samples)
+		agentRollups = loadSubagentRollups(samples, time.Now())
+		renderFrame()
+
+		// Bell + desktop notification. Aggregate NewAttention across sources so
+		// one toast covers a multi-workspace burst.
 		totalAttention := 0
 		var attentionRepo, attentionTask string
 		for _, s := range samples {
@@ -137,7 +154,10 @@ func Run(src Source) error {
 			fmt.Print("\a")
 			notify.Notify(buildNotifyMessage(totalAttention, attentionRepo, attentionTask))
 		}
+	}
 
+	refresh() // initial paint
+	for {
 		select {
 		case <-sigCh:
 			return nil
@@ -160,7 +180,9 @@ func Run(src Source) error {
 			case keyQuit:
 				return nil
 			}
+			renderFrame() // instant: re-render from cache, no re-sample
 		case <-ticker.C:
+			refresh()
 		}
 	}
 }
