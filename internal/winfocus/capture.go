@@ -15,18 +15,11 @@ import (
 // sidecarDir is the per-workspace subdirectory holding session->window bindings.
 const sidecarDir = "windows"
 
-// markerSettleDelay gives the marker time to render into the Windows Terminal
-// buffer before UI Automation reads it. powershell.exe cold-start usually
-// covers this on its own, but a small explicit wait makes capture reliable.
-const markerSettleDelay = 250 * time.Millisecond
-
-// captureAttempts re-stamps and re-scans this many times before giving up. At
-// SessionStart Claude is actively repainting and can wipe the marker before UI
-// Automation reads it; restamping on each attempt eventually catches a quiet
-// moment. retryDelay spaces the attempts.
+// captureAttempts retries the focused-window read in case focus is momentarily
+// elsewhere when the detached capture runs. retryDelay spaces the attempts.
 const (
-	captureAttempts = 4
-	retryDelay      = 400 * time.Millisecond
+	captureAttempts = 3
+	retryDelay      = 300 * time.Millisecond
 )
 
 // Binding is a session's resolved Windows Terminal location: the window handle
@@ -36,99 +29,58 @@ type Binding struct {
 	Tab  int
 }
 
-// Capture binds the current session to its Windows Terminal window+tab: it
-// writes a unique marker to the session's pts, asks Windows which WT window's
-// buffer contains it (and which tab is selected — at SessionStart that's this
-// session's tab), and records the binding in a sidecar under stateHome. No-op
-// (nil) when the environment can't support focus or the pts can't be found.
+// Capture binds the current session to its Windows Terminal window+tab and
+// records it in a sidecar under stateHome. It reads the focused window via UI
+// Automation — at SessionStart the session's tab is the focused one, right
+// after `claude` launches — so it never writes anything to the terminal (zero
+// injection). No-op when the environment can't support focus; skipped if the
+// session is already bound (delete the sidecar to force a re-bind).
 //
-// pts may be empty, in which case it is resolved from the process ancestry. The
-// hook passes it explicitly because it resolves the pts while still parented to
-// claude, then runs Capture in a detached child whose ancestry no longer leads
-// there.
-//
-// This is slow (cold powershell.exe + UIA enumeration), so callers should run
-// it off the hook's critical path.
-func Capture(stateHome, sessionID, pts string) error {
+// The read runs in a detached child off the hook's critical path, so a slow
+// powershell cold start never blocks Claude's startup. The cost of the
+// zero-injection approach is timing: if focus has already moved off the
+// session's window when the read runs, Capture binds nothing rather than the
+// wrong window (it only accepts a focused Windows Terminal window).
+func Capture(stateHome, sessionID string) error {
 	if !Enabled() || sessionID == "" {
 		Debugf("capture skip: enabled=%v sid=%q", Enabled(), sessionID)
 		return nil
 	}
-	// Idempotent: once a session is bound, never re-stamp. SessionStart can
-	// fire again (resume, etc.); re-capturing would flash the marker in the
-	// terminal each time. Delete the sidecar to force a re-bind.
 	if _, ok := ReadBinding(stateHome, sessionID); ok {
 		Debugf("capture sid=%s: already bound, skipping", sessionID)
 		return nil
 	}
-	if pts == "" {
-		pts = FindSessionPTS()
-	}
-	if pts == "" {
-		Debugf("capture sid=%s: no controlling pts in ancestry", sessionID)
-		return errors.New("winfocus: no controlling pts found in ancestry")
-	}
 
-	marker := markerFor(sessionID)
 	var b Binding
-	var scanErr error
-	// Order matters: stamp the marker, let it render, scan for it, THEN clear
-	// it. Retry because at SessionStart Claude's repaint can wipe the marker
-	// before UI Automation reads it; each attempt re-stamps a fresh marker.
+	var err error
 	for attempt := 1; attempt <= captureAttempts; attempt++ {
-		// Windows Terminal renders SGR 8 (conceal) text visibly, so we can't
-		// hide the marker by attribute. It is written plainly and cleared right
-		// after the scan; skip-if-bound above keeps this to once per session.
-		if err := writeToPTS(pts, "\r"+marker); err != nil {
-			return err
-		}
-		time.Sleep(markerSettleDelay)
-		b, scanErr = scanForMarker(marker)
-		_ = writeToPTS(pts, "\r\033[2K") // best-effort clear
-		Debugf("capture sid=%s pts=%s attempt=%d hwnd=%q tab=%d err=%v", sessionID, pts, attempt, b.HWND, b.Tab, scanErr)
-		if scanErr == nil {
+		b, err = focusedWindow()
+		Debugf("capture sid=%s attempt=%d hwnd=%q tab=%d err=%v", sessionID, attempt, b.HWND, b.Tab, err)
+		if err == nil {
 			break
 		}
 		time.Sleep(retryDelay)
 	}
-	if scanErr != nil {
-		return scanErr
+	if err != nil {
+		return err
 	}
 	return writeBinding(stateHome, sessionID, b)
 }
 
-// markerFor builds a token unlikely to collide with real terminal content.
-func markerFor(sessionID string) string {
-	return "[[cc-cockpit-focus:" + sessionID + "]]"
-}
-
-// writeToPTS writes s to the pseudo-terminal device. Writing to the pts slave
-// outputs to the terminal display, so the bytes land in the buffer that UI
-// Automation reads.
-func writeToPTS(pts, s string) error {
-	f, err := os.OpenFile(pts, os.O_WRONLY, 0)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(s)
-	return err
-}
-
-// scanForMarker runs the embedded PowerShell + UI Automation scan and returns
-// the binding for the Windows Terminal window whose buffer contains marker. A
-// non-match exits the script with code 1, surfaced here as an error.
-func scanForMarker(marker string) (Binding, error) {
+// focusedWindow returns the binding for the currently focused Windows Terminal
+// window+tab via the embedded managed-UIA script, or an error if the focused
+// top-level window is not a Windows Terminal window.
+func focusedWindow() (Binding, error) {
 	cmd := exec.Command("powershell.exe",
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-EncodedCommand", encodePS(buildScanScript(marker)))
+		"-EncodedCommand", encodePS(focusedScript()))
 	out, err := cmd.Output()
 	if err != nil {
 		return Binding{Tab: -1}, err
 	}
 	fields := strings.Fields(strings.TrimSpace(string(out)))
 	if len(fields) == 0 || fields[0] == "" {
-		return Binding{Tab: -1}, errors.New("winfocus: no WT window matched the marker")
+		return Binding{Tab: -1}, errors.New("winfocus: focused window is not Windows Terminal")
 	}
 	b := Binding{HWND: fields[0], Tab: -1}
 	if len(fields) >= 2 {
@@ -189,46 +141,28 @@ func encodePS(script string) string {
 	return base64.StdEncoding.EncodeToString(buf)
 }
 
-// buildScanScript embeds marker (single-quoted, with PS escaping) into the
-// window-scan script. It enumerates Windows Terminal windows, reads each
-// window's terminal buffer via UI Automation TextPattern, and on a match prints
-// "<hwnd> <selectedTabIndex>" — the selected tab being this session's tab at
-// SessionStart.
-func buildScanScript(marker string) string {
-	q := strings.ReplaceAll(marker, "'", "''")
+// focusedScript walks from the UIA focused element up to its top-level window
+// and, if that window is a Windows Terminal window, prints
+// "<hwnd> <selectedTabIndex>". Managed UIA only — no inline C#, so no per-call
+// compiler cost. Exits 1 if the focused window isn't Windows Terminal.
+func focusedScript() string {
 	return `$ErrorActionPreference='SilentlyContinue'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
-$marker = '` + q + `'
-Add-Type @"
-using System; using System.Text; using System.Collections.Generic; using System.Runtime.InteropServices;
-public static class W {
-  public delegate bool E(IntPtr h, IntPtr l);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(E cb, IntPtr p);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
-  public static List<IntPtr> T(string cls){ var r=new List<IntPtr>(); EnumWindows(delegate(IntPtr h, IntPtr l){ var sb=new StringBuilder(256); GetClassName(h,sb,sb.Capacity); if(sb.ToString()==cls) r.Add(h); return true;}, IntPtr.Zero); return r; }
-}
-"@
-$tp=[System.Windows.Automation.TextPattern]::Pattern
+$A=[System.Windows.Automation.AutomationElement]
+$root=$A::RootElement
+$f=$A::FocusedElement
+if($null -eq $f){ exit 1 }
+$w=[System.Windows.Automation.TreeWalker]::ControlViewWalker
+$top=$f; $cur=$f
+while($true){ $p=$w.GetParent($cur); if($null -eq $p -or $p -eq $root){ break }; $top=$p; $cur=$p }
+if($top.Current.ClassName -ne 'CASCADIA_HOSTING_WINDOW_CLASS'){ exit 1 }
+$hwnd=[int64]$top.Current.NativeWindowHandle
 $si=[System.Windows.Automation.SelectionItemPattern]::Pattern
 $cond=[System.Windows.Automation.Condition]::TrueCondition
 $scope=[System.Windows.Automation.TreeScope]::Descendants
-foreach($h in [W]::T('CASCADIA_HOSTING_WINDOW_CLASS')){
-  try{
-    $el=[System.Windows.Automation.AutomationElement]::FromHandle($h)
-    $els=@($el)+$el.FindAll($scope,$cond)
-    $found=$false
-    foreach($e in $els){
-      $p=$null; try{$p=$e.GetCurrentPattern($tp)}catch{}
-      if($p){ $txt=$p.DocumentRange.GetText(-1); if($txt -and $txt.Contains($marker)){ $found=$true; break } }
-    }
-    if($found){
-      $tab=-1; $idx=0
-      foreach($e in $els){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($s.Current.IsSelected){$tab=$idx}; $idx++ } }
-      [Console]::Out.Write(([int64]$h).ToString()+' '+$tab.ToString()); exit 0
-    }
-  }catch{}
-}
-exit 1
+$tab=-1; $idx=0
+foreach($e in $top.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($s.Current.IsSelected){$tab=$idx}; $idx++ } }
+[Console]::Out.Write($hwnd.ToString()+' '+$tab.ToString()); exit 0
 `
 }

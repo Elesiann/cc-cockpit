@@ -2,7 +2,6 @@ package winfocus
 
 import (
 	"encoding/base64"
-	"strings"
 	"testing"
 	"unicode/utf16"
 )
@@ -23,18 +22,6 @@ func TestEncodePSRoundTrip(t *testing.T) {
 	}
 	if got := string(utf16.Decode(u)); got != script {
 		t.Fatalf("round trip = %q, want %q", got, script)
-	}
-}
-
-func TestBuildScanScriptEscapesMarker(t *testing.T) {
-	s := buildScanScript("[[cc-cockpit-focus:abc-123]]")
-	if !strings.Contains(s, "$marker = '[[cc-cockpit-focus:abc-123]]'") {
-		t.Fatalf("marker not embedded as expected:\n%s", s)
-	}
-	// A single quote in the marker must be doubled for PowerShell.
-	s2 := buildScanScript("a'b")
-	if !strings.Contains(s2, "'a''b'") {
-		t.Fatalf("single quote not escaped: %s", s2)
 	}
 }
 

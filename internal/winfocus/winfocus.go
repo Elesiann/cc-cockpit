@@ -4,21 +4,18 @@
 //
 // The mechanism (validated by the spike under spike/wt-focus) is:
 //
-//   - capture: from inside the session, write a unique marker to the session's
-//     pseudo-terminal, then ask Windows (via powershell.exe + UI Automation) which
-//     Windows Terminal window's buffer contains the marker. That window's HWND is
-//     the session's window.
-//   - focus: SetForegroundWindow(HWND) (with the AttachThreadInput trick) raises it.
+//   - capture: at SessionStart the session's tab is the focused UI element, so
+//     UI Automation FocusedElement → its top-level window gives the owning
+//     Windows Terminal window HWND and selected tab index. No terminal output.
+//   - focus: select the tab via UIA and SetFocus() the window to raise it.
 //
-// Windows Terminal runs all its windows in a single process and does not expose
-// its tab title via Win32/UIA, so neither PID nor window title can identify the
-// owning window — only buffer content can. Hence the marker dance.
+// Windows Terminal runs all its windows in one process and exposes neither
+// WT_SESSION nor the OSC title via a readable UIA property, so the focused
+// window at launch is the only zero-injection handle on the right window.
 package winfocus
 
 import (
 	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -39,65 +36,4 @@ func isWSL() bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(string(data)), "microsoft")
-}
-
-// FindSessionPTS walks the process ancestry and returns the controlling
-// pseudo-terminal of the session (e.g. "/dev/pts/3"), or "" if none is found.
-//
-// Claude Code spawns its children (including this hook) with setsid, so the
-// caller has no controlling terminal of its own — but its parent `claude` still
-// owns the Windows Terminal pts. We climb parents and return the first
-// /dev/pts/N any of them has open on stdio. setsid changes the session, not the
-// parent link, so the PPID chain stays intact.
-func FindSessionPTS() string {
-	pid := os.Getppid()
-	for i := 0; i < 16 && pid > 1; i++ {
-		if pts := ptsOfPID(pid); pts != "" {
-			return pts
-		}
-		ppid, ok := parentPID(pid)
-		if !ok {
-			break
-		}
-		pid = ppid
-	}
-	return ""
-}
-
-func ptsOfPID(pid int) string {
-	for _, fd := range []string{"0", "1", "2"} {
-		target, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "fd", fd))
-		if err == nil && strings.HasPrefix(target, "/dev/pts/") {
-			return target
-		}
-	}
-	return ""
-}
-
-func parentPID(pid int) (int, bool) {
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
-	if err != nil {
-		return 0, false
-	}
-	return parsePPID(string(data))
-}
-
-// parsePPID extracts the parent PID (field 4) from a /proc/<pid>/stat line. The
-// comm field (field 2) is wrapped in parens and can itself contain spaces or
-// parens, so we parse the fixed fields after the final ')'.
-func parsePPID(stat string) (int, bool) {
-	closeParen := strings.LastIndexByte(stat, ')')
-	if closeParen < 0 || closeParen+1 >= len(stat) {
-		return 0, false
-	}
-	// After ')': field[0]=state, field[1]=ppid, ...
-	fields := strings.Fields(stat[closeParen+1:])
-	if len(fields) < 2 {
-		return 0, false
-	}
-	ppid, err := strconv.Atoi(fields[1])
-	if err != nil {
-		return 0, false
-	}
-	return ppid, true
 }

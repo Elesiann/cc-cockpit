@@ -123,8 +123,8 @@ When you run `watch` under WSL inside Windows Terminal, the dashboard is interac
 
 This is the one place cc-cockpit reaches outside its own window. It works by:
 
-- **binding** each session to its window at `SessionStart`: a marker is briefly written to the session's terminal, then matched against Windows Terminal's windows via Windows UI Automation. The resulting window handle is cached under the workspace state dir.
-- **raising** that window on demand with `SetForegroundWindow`.
+- **binding** each session to its window at `SessionStart`: the session's tab is the focused UI element right after `claude` launches, so Windows UI Automation resolves the owning Windows Terminal window and tab — without writing anything to the terminal. The window+tab is cached under the workspace state dir.
+- **raising** that window (and selecting its tab) on demand via Windows UI Automation.
 
 Outside WSL + Windows Terminal the selector is disabled and `watch` stays render-only. Only sessions started *after* installing this version can be focused — older sessions were never bound.
 

@@ -679,21 +679,16 @@ func maybeBindWindow(sid, stateHome string) {
 		winfocus.Debugf("hook SessionStart sid=%s: winfocus disabled (WT_SESSION=%q)", sid, os.Getenv("WT_SESSION"))
 		return
 	}
-	pts := winfocus.FindSessionPTS()
-	if pts == "" {
-		winfocus.Debugf("hook SessionStart sid=%s: no pts in ancestry", sid)
-		return
-	}
 	self, err := os.Executable()
 	if err != nil {
 		winfocus.Debugf("hook SessionStart sid=%s: os.Executable err=%v", sid, err)
 		return
 	}
-	cmd := exec.Command(self, "bind-window", "--session", sid, "--state-home", stateHome, "--pts", pts)
+	cmd := exec.Command(self, "bind-window", "--session", sid, "--state-home", stateHome)
 	// New session so the child outlives this short-lived hook process.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	startErr := cmd.Start()
-	winfocus.Debugf("hook SessionStart sid=%s: spawned bind-window pts=%s self=%s err=%v", sid, pts, self, startErr)
+	winfocus.Debugf("hook SessionStart sid=%s: spawned bind-window self=%s err=%v", sid, self, startErr)
 }
 
 // appendSyntheticEnd writes a SessionEnd event tagged synthetic. The reducer's
@@ -716,7 +711,6 @@ func runBindWindow(args []string) int {
 	fs := flag.NewFlagSet("bind-window", flag.ContinueOnError)
 	session := fs.String("session", "", "session id")
 	stateHome := fs.String("state-home", "", "state dir for the session's workspace")
-	pts := fs.String("pts", "", "controlling pts (resolved from ancestry if empty)")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -724,7 +718,7 @@ func runBindWindow(args []string) int {
 	if *session == "" || *stateHome == "" {
 		die("bind-window", "need --session and --state-home")
 	}
-	if err := winfocus.Capture(*stateHome, *session, *pts); err != nil {
+	if err := winfocus.Capture(*stateHome, *session); err != nil {
 		fmt.Fprintf(os.Stderr, "bind-window: %v\n", err)
 		return 1
 	}
