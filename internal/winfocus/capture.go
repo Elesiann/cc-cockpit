@@ -43,13 +43,18 @@ func Capture(stateHome, sessionID, pts string) error {
 	}
 
 	marker := markerFor(sessionID)
-	if err := stampAndClear(pts, marker); err != nil {
+	// Order matters: stamp the marker, let it render, scan for it, THEN clear
+	// it. Clearing before the scan (an earlier bug) erased the marker before UI
+	// Automation could read it, so every scan came back empty.
+	if err := writeToPTS(pts, "\r"+marker); err != nil {
 		return err
 	}
-
-	hwnd, err := scanForMarker(marker)
-	if err != nil {
-		return err
+	time.Sleep(markerSettleDelay)
+	hwnd, scanErr := scanForMarker(marker)
+	// Best-effort cleanup: CR + clear line. A live TUI repaints over it anyway.
+	_ = writeToPTS(pts, "\r\033[2K")
+	if scanErr != nil {
+		return scanErr
 	}
 	return writeSidecar(stateHome, sessionID, hwnd)
 }
@@ -59,24 +64,16 @@ func markerFor(sessionID string) string {
 	return "[[cc-cockpit-focus:" + sessionID + "]]"
 }
 
-// stampAndClear writes the marker to the pts, waits for it to render, and then
-// clears the line. The marker stays visible only for markerSettleDelay plus the
-// scan; the surrounding save/restore-cursor + clear-line keeps the disturbance
-// to a single transient line. Best-effort: a live TUI may redraw over it, which
-// is fine — the scan reads the buffer in between.
-func stampAndClear(pts, marker string) error {
+// writeToPTS writes s to the pseudo-terminal device. Writing to the pts slave
+// outputs to the terminal display, so the bytes land in the buffer that UI
+// Automation reads.
+func writeToPTS(pts, s string) error {
 	f, err := os.OpenFile(pts, os.O_WRONLY, 0)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	// DECSC (save cursor) + marker, so we can restore afterwards.
-	if _, err := f.WriteString("\0337" + marker); err != nil {
-		return err
-	}
-	time.Sleep(markerSettleDelay)
-	// CR + clear whole line + DECRC (restore cursor).
-	_, err = f.WriteString("\r\033[2K\0338")
+	_, err = f.WriteString(s)
 	return err
 }
 
