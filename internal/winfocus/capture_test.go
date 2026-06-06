@@ -39,6 +39,27 @@ func TestBindingRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSafeSessionID(t *testing.T) {
+	ok := []string{"441e8bc1-39dc-4b66-bf5b-b46dcb7a875e", "abc", "a.b"}
+	bad := []string{"", ".", "..", "../etc", "a/b", `a\b`, "/abs"}
+	for _, s := range ok {
+		if !safeSessionID(s) {
+			t.Errorf("safeSessionID(%q) = false, want true", s)
+		}
+	}
+	for _, s := range bad {
+		if safeSessionID(s) {
+			t.Errorf("safeSessionID(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestReadBindingRejectsUnsafeID(t *testing.T) {
+	if _, ok := ReadBinding(t.TempDir(), "../escape"); ok {
+		t.Fatalf("ReadBinding should reject a path-traversing session id")
+	}
+}
+
 func TestBindingRoundTripNoTab(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeBinding(dir, "s", Binding{HWND: "42"}); err != nil {

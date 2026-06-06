@@ -45,7 +45,7 @@ type Binding struct {
 // session's window when the read runs, Capture binds nothing rather than the
 // wrong window (it only accepts a focused Windows Terminal window).
 func Capture(stateHome, sessionID string) error {
-	if !Enabled() || sessionID == "" {
+	if !Enabled() || !safeSessionID(sessionID) {
 		Debugf("capture skip: enabled=%v sid=%q", Enabled(), sessionID)
 		return nil
 	}
@@ -62,7 +62,9 @@ func Capture(stateHome, sessionID string) error {
 		if err == nil {
 			break
 		}
-		time.Sleep(retryDelay)
+		if attempt < captureAttempts {
+			time.Sleep(retryDelay)
+		}
 	}
 	if err != nil {
 		return err
@@ -111,8 +113,19 @@ func writeBinding(stateHome, sessionID string, b Binding) error {
 	return os.Rename(tmp, path)
 }
 
+// safeSessionID rejects empty IDs and anything that could escape the sidecar
+// directory when used as a filename. Session IDs are UUIDs from Claude Code's
+// hook payload; this is a cheap guard against a crafted value writing or reading
+// outside <stateHome>/windows.
+func safeSessionID(s string) bool {
+	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, `/\`)
+}
+
 // ReadBinding returns the bound window/tab for sessionID, or ok=false if unbound.
 func ReadBinding(stateHome, sessionID string) (Binding, bool) {
+	if !safeSessionID(sessionID) {
+		return Binding{}, false
+	}
 	data, err := os.ReadFile(filepath.Join(stateHome, sidecarDir, sessionID))
 	if err != nil {
 		return Binding{}, false

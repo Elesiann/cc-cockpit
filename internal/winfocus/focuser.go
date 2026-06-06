@@ -8,14 +8,20 @@ import (
 	"sync"
 )
 
+// ErrClosed is returned by Focus after the Focuser has been closed, so callers
+// can tell a shutdown apart from a real focus failure and skip the cold-path
+// fallback.
+var ErrClosed = errors.New("winfocus: focuser closed")
+
 // Focuser keeps a warm powershell.exe with UI Automation already loaded and
 // drives it over stdin, so each focus is a pipe write instead of a fresh
 // ~1s powershell + assembly cold start. It lives for the duration of an
 // interactive watch and is killed on Close.
 type Focuser struct {
-	mu    sync.Mutex
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
+	mu     sync.Mutex
+	cmd    *exec.Cmd
+	stdin  io.WriteCloser
+	closed bool
 }
 
 // NewFocuser spawns the warm helper. The caller must Close it.
@@ -27,9 +33,18 @@ func NewFocuser() (*Focuser, error) {
 	if err != nil {
 		return nil, err
 	}
+	started := false
+	// On any failure before we hand ownership to the Focuser, close the pipe so
+	// its fd doesn't leak.
+	defer func() {
+		if !started {
+			_ = stdin.Close()
+		}
+	}()
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	started = true
 	return &Focuser{cmd: cmd, stdin: stdin}, nil
 }
 
@@ -45,6 +60,9 @@ func (f *Focuser) Focus(b Binding) error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		return ErrClosed
+	}
 	line := hwnd
 	if b.TabRID != "" && validRID(b.TabRID) {
 		line += " " + b.TabRID
@@ -60,6 +78,7 @@ func (f *Focuser) Close() error {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.closed = true
 	if f.stdin != nil {
 		_ = f.stdin.Close()
 	}

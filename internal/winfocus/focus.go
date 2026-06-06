@@ -16,9 +16,16 @@ func Focus(b Binding) error {
 	if !validHWND(hwnd) {
 		return errors.New("winfocus: invalid HWND")
 	}
+	// Drop an unvalidated RID rather than interpolate it: the RID is embedded in
+	// the script as a string literal, so this matches the warm focuser's guard
+	// and keeps the cold path injection-safe even via the focus-window CLI.
+	rid := b.TabRID
+	if rid != "" && !validRID(rid) {
+		rid = ""
+	}
 	cmd := exec.Command("powershell.exe",
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-EncodedCommand", encodePS(buildFocusScript(hwnd, b.TabRID)))
+		"-EncodedCommand", encodePS(buildFocusScript(hwnd, rid)))
 	return cmd.Run()
 }
 

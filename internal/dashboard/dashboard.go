@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -273,8 +274,12 @@ func focusRow(f *winfocus.Focuser, r activeRow) {
 	}
 	StatusLine = "→ focusing " + sessionRepoLabel(r.sess) + " (" + shortSID(r.sid) + ")"
 	go func() {
-		if f != nil && f.Focus(b) == nil {
-			return
+		if f != nil {
+			// On a clean warm-path success, or a shutdown race, don't fall
+			// through to the cold one-shot.
+			if err := f.Focus(b); err == nil || errors.Is(err, winfocus.ErrClosed) {
+				return
+			}
 		}
 		_ = winfocus.Focus(b) // fallback: cold one-shot
 	}()
