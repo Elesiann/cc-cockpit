@@ -39,44 +39,30 @@ func validHWND(s string) bool {
 }
 
 // buildFocusScript interpolates the (validated, numeric) hwnd and tab index into
-// the raise script. When tab >= 0 it first selects that tab via UI Automation
-// (same Descendants+SelectionItem ordering capture used), then attaches to the
-// current foreground thread's input queue and SetForegroundWindow. Exits 0 on
-// success.
+// a raise script that uses only managed UI Automation — no inline C# Add-Type,
+// which would invoke the C# compiler on every call and add ~half a second.
+// When tab >= 0 it first selects that tab (same Descendants+SelectionItem
+// ordering capture used), un-minimizes via WindowPattern, then SetFocus() to
+// bring the window forward.
 func buildFocusScript(hwnd string, tab int) string {
 	tabBlock := ""
 	if tab >= 0 {
 		tabBlock = `
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
 $si=[System.Windows.Automation.SelectionItemPattern]::Pattern
 $cond=[System.Windows.Automation.Condition]::TrueCondition
 $scope=[System.Windows.Automation.TreeScope]::Descendants
-$el=[System.Windows.Automation.AutomationElement]::FromHandle($h)
 $idx=0
 foreach($e in $el.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($idx -eq ` + strconv.Itoa(tab) + `){ try{$s.Select()}catch{}; break }; $idx++ } }
 `
 	}
 	return `$ErrorActionPreference='SilentlyContinue'
-Add-Type @"
-using System; using System.Runtime.InteropServices;
-public static class F {
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int c);
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
-  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
-  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
-}
-"@
-$h=[IntPtr][int64]` + hwnd + tabBlock + `
-if([F]::IsIconic($h)){[void][F]::ShowWindow($h,9)}
-$fg=[F]::GetForegroundWindow(); $p=[uint32]0; $ft=[F]::GetWindowThreadProcessId($fg,[ref]$p); $mt=[F]::GetCurrentThreadId()
-$att=$false; if($ft -ne $mt){$att=[F]::AttachThreadInput($mt,$ft,$true)}
-[void][F]::BringWindowToTop($h); $ok=[F]::SetForegroundWindow($h); [void][F]::ShowWindow($h,5)
-if($att){[void][F]::AttachThreadInput($mt,$ft,$false)}
-if($ok){exit 0}else{exit 1}
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$h=[IntPtr][int64]` + hwnd + `
+$el=[System.Windows.Automation.AutomationElement]::FromHandle($h)
+if(-not $el){ exit 1 }` + tabBlock + `
+try{ $wp=$el.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern); if($wp){ $wp.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal) } }catch{}
+try{ $el.SetFocus() }catch{}
+exit 0
 `
 }
