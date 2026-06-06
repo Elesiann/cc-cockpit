@@ -23,7 +23,7 @@ cd ~/work/api
 claude
 ```
 
-With the hooks installed, the session appears in `cc-cockpit watch` within one tick. cc-cockpit does not launch Claude, manage panes, create branches, or touch your repos. It only reads Claude Code hook events and renders the state.
+With the hooks installed, the session appears in `cc-cockpit watch` within one tick. cc-cockpit does not launch Claude, create branches, or touch your repos. It reads Claude Code hook events and renders the state. The one action it can take is an opt-in convenience: on WSL + Windows Terminal it can bring a selected session's window to the foreground (see [Jump to a session](#jump-to-a-session-wsl--windows-terminal)).
 
 ---
 
@@ -35,7 +35,7 @@ cc-cockpit lives above the agent layer. It does not dispatch agents, isolate fil
 
 ### Principles
 
-- **Observation, not orchestration.** cc-cockpit reads hook events; it never starts Claude for you.
+- **Observation, not orchestration.** cc-cockpit reads hook events; it never starts Claude, edits files, or manages worktrees. The sole exception is an opt-in convenience on WSL + Windows Terminal: raising a selected session's window to the foreground.
 - **Your repos stay untouched.** No worktrees, no auto-branches, no generated project files.
 - **No daemon.** Just Claude Code hooks, an append-only event log, and a terminal dashboard.
 - **Composable.** Use vanilla `claude`, background agents, or any workflow that emits Claude Code hook events.
@@ -116,6 +116,17 @@ You do not need a workspace to use cc-cockpit. Workspaces are only for stable na
 - **Stale flag:** mid-turn sessions with no events for 15 minutes render with `?`.
 - **Desktop notifications:** waiting sessions call `wsl-notify-send.exe`, `notify-send`, or `osascript` when available.
 - **Clean exit:** `Ctrl-C` restores the terminal.
+
+### Jump to a session (WSL + Windows Terminal)
+
+When you run `watch` under WSL inside Windows Terminal, the dashboard is interactive: use `↑`/`↓` (or `j`/`k`) to select a session and press `Enter` to bring that session's terminal window to the foreground. `q` quits.
+
+This is the one place cc-cockpit reaches outside its own window. It works by:
+
+- **binding** each session to its window at `SessionStart`: a marker is briefly written to the session's terminal, then matched against Windows Terminal's windows via Windows UI Automation. The resulting window handle is cached under the workspace state dir.
+- **raising** that window on demand with `SetForegroundWindow`.
+
+Outside WSL + Windows Terminal the selector is disabled and `watch` stays render-only. Only sessions started *after* installing this version can be focused — older sessions were never bound.
 
 ---
 
