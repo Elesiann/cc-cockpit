@@ -29,6 +29,16 @@ const (
 // watch behavior.
 var ActiveSort = SortStarted
 
+// Selected is the session id of the highlighted row in interactive watch, or ""
+// when there is no selection (non-interactive mode, or no selectable rows).
+// Written by the Run loop between ticks and read by the render path; both run
+// on the same goroutine, so no synchronization is needed.
+var Selected string
+
+// StatusLine is a transient one-line message shown in the watch footer (e.g.
+// the result of a focus attempt). Same single-goroutine contract as Selected.
+var StatusLine string
+
 // TaggedState pairs a reduced state with the human name of the workspace it
 // came from. Multi-source renders use Name as the "WS" column.
 type TaggedState struct {

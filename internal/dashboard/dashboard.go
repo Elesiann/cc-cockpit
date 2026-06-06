@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/elesiann/cc-cockpit/internal/state"
+	"github.com/elesiann/cc-cockpit/internal/winfocus"
 )
 
 // Run drives the dashboard loop until SIGINT/SIGTERM/SIGHUP/SIGQUIT. The
@@ -26,6 +27,20 @@ func Run(src Source) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(sigCh)
+
+	// Interactive selection (arrow keys → focus a session's window) is only
+	// meaningful where window focus works: WSL + Windows Terminal. Elsewhere
+	// watch stays exactly as it was — render-only. If stdin isn't a terminal,
+	// enableCharInput fails and we silently fall back to non-interactive.
+	var keyCh chan key
+	if winfocus.Enabled() {
+		if restore, err := enableCharInput(int(os.Stdin.Fd())); err == nil {
+			defer restore()
+			keyCh = make(chan key, 16)
+			go readKeys(os.Stdin, keyCh)
+		}
+	}
+	selIdx := 0
 
 	home, _ := os.UserHomeDir()
 	notify := resolveNotifier()
@@ -67,6 +82,21 @@ func Run(src Source) error {
 		}
 
 		now := time.Now()
+		// Keep the selection in range as sessions come and go, and publish the
+		// selected sid for the renderer to highlight.
+		rows := activeRowsOrdered(samples, now)
+		if selIdx >= len(rows) {
+			selIdx = len(rows) - 1
+		}
+		if selIdx < 0 {
+			selIdx = 0
+		}
+		if keyCh != nil && len(rows) > 0 {
+			Selected = rows[selIdx].sid
+		} else {
+			Selected = ""
+		}
+
 		sessionMetas := metas.Load(home)
 		recapTexts := recaps.load(samples)
 		agentRollups := loadSubagentRollups(samples, now)
@@ -111,9 +141,41 @@ func Run(src Source) error {
 		select {
 		case <-sigCh:
 			return nil
+		case k := <-keyCh: // nil channel when non-interactive: this case never fires
+			switch k {
+			case keyUp:
+				if selIdx > 0 {
+					selIdx--
+				}
+				StatusLine = ""
+			case keyDown:
+				if selIdx < len(rows)-1 {
+					selIdx++
+				}
+				StatusLine = ""
+			case keyEnter:
+				if len(rows) > 0 {
+					focusRow(rows[selIdx])
+				}
+			case keyQuit:
+				return nil
+			}
 		case <-ticker.C:
 		}
 	}
+}
+
+// focusRow raises the Windows Terminal window bound to the selected session.
+// The actual focus call is slow (cold powershell.exe), so it runs in a
+// goroutine to keep the dashboard responsive; StatusLine reports the attempt.
+func focusRow(r activeRow) {
+	hwnd, ok := winfocus.ReadHWND(r.home, r.sid)
+	if !ok {
+		StatusLine = "no window bound for " + shortSID(r.sid) + " — start a fresh claude session under WSL+WT"
+		return
+	}
+	StatusLine = "→ focusing " + sessionRepoLabel(r.sess) + " (" + shortSID(r.sid) + ")"
+	go func() { _ = winfocus.Focus(hwnd) }()
 }
 
 // loadBellSeq returns the persisted bell baseline for stateHome, falling back
