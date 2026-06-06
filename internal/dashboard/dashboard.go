@@ -223,13 +223,13 @@ func Run(src Source) error {
 // The actual focus call is slow (cold powershell.exe), so it runs in a
 // goroutine to keep the dashboard responsive; StatusLine reports the attempt.
 func focusRow(r activeRow) {
-	hwnd, ok := winfocus.ReadHWND(r.home, r.sid)
+	b, ok := winfocus.ReadBinding(r.home, r.sid)
 	if !ok {
 		StatusLine = "no window bound for " + shortSID(r.sid) + " — start a fresh claude session under WSL+WT"
 		return
 	}
 	StatusLine = "→ focusing " + sessionRepoLabel(r.sess) + " (" + shortSID(r.sid) + ")"
-	go func() { _ = winfocus.Focus(hwnd) }()
+	go func() { _ = winfocus.Focus(b) }()
 }
 
 // loadBellSeq returns the persisted bell baseline for stateHome, falling back

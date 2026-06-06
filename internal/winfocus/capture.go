@@ -6,12 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
 )
 
-// sidecarDir is the per-workspace subdirectory holding session->HWND bindings.
+// sidecarDir is the per-workspace subdirectory holding session->window bindings.
 const sidecarDir = "windows"
 
 // markerSettleDelay gives the marker time to render into the Windows Terminal
@@ -28,10 +29,18 @@ const (
 	retryDelay      = 400 * time.Millisecond
 )
 
-// Capture binds the current session to its Windows Terminal window: it writes a
-// unique marker to the session's pts, asks Windows which WT window's buffer
-// contains it, and records that HWND in a sidecar under stateHome. No-op (nil)
-// when the environment can't support focus or the pts can't be found.
+// Binding is a session's resolved Windows Terminal location: the window handle
+// plus the index of its tab (Tab < 0 means "window only / tab unknown").
+type Binding struct {
+	HWND string
+	Tab  int
+}
+
+// Capture binds the current session to its Windows Terminal window+tab: it
+// writes a unique marker to the session's pts, asks Windows which WT window's
+// buffer contains it (and which tab is selected — at SessionStart that's this
+// session's tab), and records the binding in a sidecar under stateHome. No-op
+// (nil) when the environment can't support focus or the pts can't be found.
 //
 // pts may be empty, in which case it is resolved from the process ancestry. The
 // hook passes it explicitly because it resolves the pts while still parented to
@@ -54,7 +63,7 @@ func Capture(stateHome, sessionID, pts string) error {
 	}
 
 	marker := markerFor(sessionID)
-	var hwnd string
+	var b Binding
 	var scanErr error
 	// Order matters: stamp the marker, let it render, scan for it, THEN clear
 	// it. Retry because at SessionStart Claude's repaint can wipe the marker
@@ -64,9 +73,9 @@ func Capture(stateHome, sessionID, pts string) error {
 			return err
 		}
 		time.Sleep(markerSettleDelay)
-		hwnd, scanErr = scanForMarker(marker)
+		b, scanErr = scanForMarker(marker)
 		_ = writeToPTS(pts, "\r\033[2K") // best-effort clear
-		Debugf("capture sid=%s pts=%s attempt=%d hwnd=%q err=%v", sessionID, pts, attempt, hwnd, scanErr)
+		Debugf("capture sid=%s pts=%s attempt=%d hwnd=%q tab=%d err=%v", sessionID, pts, attempt, b.HWND, b.Tab, scanErr)
 		if scanErr == nil {
 			break
 		}
@@ -75,7 +84,7 @@ func Capture(stateHome, sessionID, pts string) error {
 	if scanErr != nil {
 		return scanErr
 	}
-	return writeSidecar(stateHome, sessionID, hwnd)
+	return writeBinding(stateHome, sessionID, b)
 }
 
 // markerFor builds a token unlikely to collide with real terminal content.
@@ -97,48 +106,66 @@ func writeToPTS(pts, s string) error {
 }
 
 // scanForMarker runs the embedded PowerShell + UI Automation scan and returns
-// the decimal HWND of the Windows Terminal window whose buffer contains marker.
-// A non-match exits the script with code 1, surfaced here as an error.
-func scanForMarker(marker string) (string, error) {
+// the binding for the Windows Terminal window whose buffer contains marker. A
+// non-match exits the script with code 1, surfaced here as an error.
+func scanForMarker(marker string) (Binding, error) {
 	cmd := exec.Command("powershell.exe",
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
 		"-EncodedCommand", encodePS(buildScanScript(marker)))
 	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		return Binding{Tab: -1}, err
 	}
-	hwnd := strings.TrimSpace(string(out))
-	if hwnd == "" {
-		return "", errors.New("winfocus: no WT window matched the marker")
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) == 0 || fields[0] == "" {
+		return Binding{Tab: -1}, errors.New("winfocus: no WT window matched the marker")
 	}
-	return hwnd, nil
+	b := Binding{HWND: fields[0], Tab: -1}
+	if len(fields) >= 2 {
+		if n, e := strconv.Atoi(fields[1]); e == nil {
+			b.Tab = n
+		}
+	}
+	return b, nil
 }
 
-// writeSidecar atomically records hwnd at <stateHome>/windows/<sessionID>.
-func writeSidecar(stateHome, sessionID, hwnd string) error {
+// writeBinding atomically records the binding at <stateHome>/windows/<sessionID>
+// as "HWND:TAB" (TAB omitted when < 0).
+func writeBinding(stateHome, sessionID string, b Binding) error {
 	dir := filepath.Join(stateHome, sidecarDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	val := b.HWND
+	if b.Tab >= 0 {
+		val += ":" + strconv.Itoa(b.Tab)
+	}
 	path := filepath.Join(dir, sessionID)
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(hwnd+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(tmp, []byte(val+"\n"), 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
 }
 
-// ReadHWND returns the bound HWND for sessionID, or ("", false) if unbound.
-func ReadHWND(stateHome, sessionID string) (string, bool) {
+// ReadBinding returns the bound window/tab for sessionID, or ok=false if unbound.
+func ReadBinding(stateHome, sessionID string) (Binding, bool) {
 	data, err := os.ReadFile(filepath.Join(stateHome, sidecarDir, sessionID))
 	if err != nil {
-		return "", false
+		return Binding{}, false
 	}
-	hwnd := strings.TrimSpace(string(data))
-	if hwnd == "" {
-		return "", false
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return Binding{}, false
 	}
-	return hwnd, true
+	hwnd, tabStr, hasTab := strings.Cut(s, ":")
+	b := Binding{HWND: hwnd, Tab: -1}
+	if hasTab {
+		if n, e := strconv.Atoi(tabStr); e == nil {
+			b.Tab = n
+		}
+	}
+	return b, true
 }
 
 // encodePS encodes a PowerShell script for -EncodedCommand: UTF-16LE then
@@ -154,8 +181,9 @@ func encodePS(script string) string {
 
 // buildScanScript embeds marker (single-quoted, with PS escaping) into the
 // window-scan script. It enumerates Windows Terminal windows, reads each
-// window's terminal buffer via UI Automation TextPattern, and prints the HWND
-// of the first whose buffer contains the marker.
+// window's terminal buffer via UI Automation TextPattern, and on a match prints
+// "<hwnd> <selectedTabIndex>" — the selected tab being this session's tab at
+// SessionStart.
 func buildScanScript(marker string) string {
 	q := strings.ReplaceAll(marker, "'", "''")
 	return `$ErrorActionPreference='SilentlyContinue'
@@ -172,15 +200,22 @@ public static class W {
 }
 "@
 $tp=[System.Windows.Automation.TextPattern]::Pattern
+$si=[System.Windows.Automation.SelectionItemPattern]::Pattern
 $cond=[System.Windows.Automation.Condition]::TrueCondition
 $scope=[System.Windows.Automation.TreeScope]::Descendants
 foreach($h in [W]::T('CASCADIA_HOSTING_WINDOW_CLASS')){
   try{
     $el=[System.Windows.Automation.AutomationElement]::FromHandle($h)
     $els=@($el)+$el.FindAll($scope,$cond)
+    $found=$false
     foreach($e in $els){
       $p=$null; try{$p=$e.GetCurrentPattern($tp)}catch{}
-      if($p){ $txt=$p.DocumentRange.GetText(-1); if($txt -and $txt.Contains($marker)){ [Console]::Out.Write([int64]$h); exit 0 } }
+      if($p){ $txt=$p.DocumentRange.GetText(-1); if($txt -and $txt.Contains($marker)){ $found=$true; break } }
+    }
+    if($found){
+      $tab=-1; $idx=0
+      foreach($e in $els){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($s.Current.IsSelected){$tab=$idx}; $idx++ } }
+      [Console]::Out.Write(([int64]$h).ToString()+' '+$tab.ToString()); exit 0
     }
   }catch{}
 }

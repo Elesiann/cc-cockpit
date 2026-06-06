@@ -3,22 +3,23 @@ package winfocus
 import (
 	"errors"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
-// Focus raises the Windows Terminal window with the given decimal HWND to the
-// foreground. It is meant to be called from the cockpit window (the one the
-// operator is looking at), which holds foreground rights — so the
-// AttachThreadInput dance in the script reliably wins over Windows'
-// foreground-stealing guard.
-func Focus(hwnd string) error {
-	hwnd = strings.TrimSpace(hwnd)
+// Focus brings the bound Windows Terminal window to the foreground, first
+// selecting the session's tab (when known) so the right session is shown — not
+// just whatever tab happened to be active. Meant to be called from the cockpit
+// window (which holds foreground rights), so the AttachThreadInput dance in the
+// script reliably wins over Windows' foreground-stealing guard.
+func Focus(b Binding) error {
+	hwnd := strings.TrimSpace(b.HWND)
 	if !validHWND(hwnd) {
 		return errors.New("winfocus: invalid HWND")
 	}
 	cmd := exec.Command("powershell.exe",
 		"-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-EncodedCommand", encodePS(buildFocusScript(hwnd)))
+		"-EncodedCommand", encodePS(buildFocusScript(hwnd, b.Tab)))
 	return cmd.Run()
 }
 
@@ -37,10 +38,25 @@ func validHWND(s string) bool {
 	return true
 }
 
-// buildFocusScript interpolates the (validated, numeric) hwnd into the raise
-// script. Restores a minimized window, attaches to the current foreground
-// thread's input queue, then SetForegroundWindow. Exits 0 on success.
-func buildFocusScript(hwnd string) string {
+// buildFocusScript interpolates the (validated, numeric) hwnd and tab index into
+// the raise script. When tab >= 0 it first selects that tab via UI Automation
+// (same Descendants+SelectionItem ordering capture used), then attaches to the
+// current foreground thread's input queue and SetForegroundWindow. Exits 0 on
+// success.
+func buildFocusScript(hwnd string, tab int) string {
+	tabBlock := ""
+	if tab >= 0 {
+		tabBlock = `
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+$si=[System.Windows.Automation.SelectionItemPattern]::Pattern
+$cond=[System.Windows.Automation.Condition]::TrueCondition
+$scope=[System.Windows.Automation.TreeScope]::Descendants
+$el=[System.Windows.Automation.AutomationElement]::FromHandle($h)
+$idx=0
+foreach($e in $el.FindAll($scope,$cond)){ $s=$null; try{$s=$e.GetCurrentPattern($si)}catch{}; if($s){ if($idx -eq ` + strconv.Itoa(tab) + `){ try{$s.Select()}catch{}; break }; $idx++ } }
+`
+	}
 	return `$ErrorActionPreference='SilentlyContinue'
 Add-Type @"
 using System; using System.Runtime.InteropServices;
@@ -55,7 +71,7 @@ public static class F {
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 }
 "@
-$h=[IntPtr][int64]` + hwnd + `
+$h=[IntPtr][int64]` + hwnd + tabBlock + `
 if([F]::IsIconic($h)){[void][F]::ShowWindow($h,9)}
 $fg=[F]::GetForegroundWindow(); $p=[uint32]0; $ft=[F]::GetWindowThreadProcessId($fg,[ref]$p); $mt=[F]::GetCurrentThreadId()
 $att=$false; if($ft -ne $mt){$att=[F]::AttachThreadInput($mt,$ft,$true)}

@@ -21,8 +21,22 @@ func TestValidHWND(t *testing.T) {
 }
 
 func TestBuildFocusScriptInterpolatesHWND(t *testing.T) {
-	s := buildFocusScript("590104")
+	s := buildFocusScript("590104", -1)
 	if !strings.Contains(s, "[IntPtr][int64]590104") {
 		t.Fatalf("hwnd not interpolated as numeric literal:\n%s", s)
+	}
+	// No tab → no UIA tab-selection block.
+	if strings.Contains(s, "SelectionItemPattern") {
+		t.Fatalf("tab<0 should not emit a tab-select block:\n%s", s)
+	}
+}
+
+func TestBuildFocusScriptSelectsTab(t *testing.T) {
+	s := buildFocusScript("590104", 3)
+	if !strings.Contains(s, "SelectionItemPattern") {
+		t.Fatalf("tab>=0 should emit a tab-select block:\n%s", s)
+	}
+	if !strings.Contains(s, "-eq 3)") {
+		t.Fatalf("tab index 3 not interpolated:\n%s", s)
 	}
 }

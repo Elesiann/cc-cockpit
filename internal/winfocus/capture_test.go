@@ -38,16 +38,27 @@ func TestBuildScanScriptEscapesMarker(t *testing.T) {
 	}
 }
 
-func TestSidecarRoundTrip(t *testing.T) {
+func TestBindingRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	if err := writeSidecar(dir, "sess-1", "590104"); err != nil {
-		t.Fatalf("writeSidecar: %v", err)
+	if err := writeBinding(dir, "sess-1", Binding{HWND: "590104", Tab: 3}); err != nil {
+		t.Fatalf("writeBinding: %v", err)
 	}
-	got, ok := ReadHWND(dir, "sess-1")
-	if !ok || got != "590104" {
-		t.Fatalf("ReadHWND = (%q,%v), want (590104,true)", got, ok)
+	got, ok := ReadBinding(dir, "sess-1")
+	if !ok || got.HWND != "590104" || got.Tab != 3 {
+		t.Fatalf("ReadBinding = (%+v,%v), want ({590104 3},true)", got, ok)
 	}
-	if _, ok := ReadHWND(dir, "missing"); ok {
-		t.Fatalf("ReadHWND for missing session should be false")
+	if _, ok := ReadBinding(dir, "missing"); ok {
+		t.Fatalf("ReadBinding for missing session should be false")
+	}
+}
+
+func TestBindingRoundTripNoTab(t *testing.T) {
+	dir := t.TempDir()
+	if err := writeBinding(dir, "s", Binding{HWND: "42", Tab: -1}); err != nil {
+		t.Fatalf("writeBinding: %v", err)
+	}
+	got, ok := ReadBinding(dir, "s")
+	if !ok || got.HWND != "42" || got.Tab != -1 {
+		t.Fatalf("ReadBinding = (%+v,%v), want ({42 -1},true)", got, ok)
 	}
 }
