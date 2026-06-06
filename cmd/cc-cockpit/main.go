@@ -784,7 +784,7 @@ func runWatch(args []string) int {
 	}
 	dashboard.ActiveSort = sortMode
 	root := dashboard.DefaultStateRoot(homeDir(), os.Getenv)
-	src := dashboard.AggregateSource{StateRoot: root, AllowedWorkspaces: allowed, Sort: sortMode}
+	src := dashboard.AggregateSource{StateRoot: root, AllowedWorkspaces: allowed}
 	if err := dashboard.Run(src); err != nil {
 		die("watch", err.Error())
 	}

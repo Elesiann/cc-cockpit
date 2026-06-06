@@ -41,11 +41,14 @@ func Run(src Source) error {
 			defer restore()
 			keyCh = make(chan key, 16)
 			go readKeys(os.Stdin, keyCh)
-			// A list that reshuffles under the cursor is unnavigable, so the
-			// interactive selector pins to the stable started order (StartedAt
-			// is fixed per session) instead of activity/attention, which
-			// re-rank as time passes.
-			ActiveSort = SortStarted
+			// The cursor tracks a session by id, so it survives reorders — but
+			// the `activity` order re-ranks on every tick as timers advance,
+			// which makes the list churn under the cursor. Demote only that one
+			// to the stable started order; `attention` (re-ranks only on status
+			// changes) is the order users most want here, so it's honored.
+			if ActiveSort == SortActivity {
+				ActiveSort = SortStarted
+			}
 			// Warm focus helper: keeps powershell + UIA loaded so each Enter is
 			// a pipe write, not a ~1s cold start. Best-effort; nil falls back
 			// to a cold one-shot per focus.

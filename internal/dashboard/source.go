@@ -72,7 +72,6 @@ type Source interface {
 type AggregateSource struct {
 	StateRoot         string // e.g. ~/.local/state/cc-cockpit
 	AllowedWorkspaces []string
-	Sort              string
 }
 
 func (a AggregateSource) Sample() ([]TaggedState, error) {
@@ -118,9 +117,12 @@ func (a AggregateSource) Sample() ([]TaggedState, error) {
 }
 
 func (a AggregateSource) HeaderName(samples []TaggedState) string {
+	// Reflect the order actually in effect (ActiveSort), not the one requested
+	// on the CLI: interactive mode may demote `activity` to `started`, and the
+	// header must not claim a sort the render path isn't using.
 	sortSuffix := ""
-	if a.Sort != "" && a.Sort != SortStarted {
-		sortSuffix = " · sort=" + a.Sort
+	if ActiveSort != "" && ActiveSort != SortStarted {
+		sortSuffix = " · sort=" + ActiveSort
 	}
 	if len(a.AllowedWorkspaces) > 0 {
 		return fmt.Sprintf("watch · %d/%s%s", len(samples), strings.Join(a.AllowedWorkspaces, ","), sortSuffix)
