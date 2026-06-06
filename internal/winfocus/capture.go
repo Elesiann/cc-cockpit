@@ -24,13 +24,20 @@ const markerSettleDelay = 250 * time.Millisecond
 // contains it, and records that HWND in a sidecar under stateHome. No-op (nil)
 // when the environment can't support focus or the pts can't be found.
 //
+// pts may be empty, in which case it is resolved from the process ancestry. The
+// hook passes it explicitly because it resolves the pts while still parented to
+// claude, then runs Capture in a detached child whose ancestry no longer leads
+// there.
+//
 // This is slow (cold powershell.exe + UIA enumeration), so callers should run
 // it off the hook's critical path.
-func Capture(stateHome, sessionID string) error {
+func Capture(stateHome, sessionID, pts string) error {
 	if !Enabled() || sessionID == "" {
 		return nil
 	}
-	pts := FindSessionPTS()
+	if pts == "" {
+		pts = FindSessionPTS()
+	}
 	if pts == "" {
 		return errors.New("winfocus: no controlling pts found in ancestry")
 	}

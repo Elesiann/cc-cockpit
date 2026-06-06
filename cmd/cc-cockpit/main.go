@@ -13,12 +13,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/elesiann/cc-cockpit/internal/dashboard"
 	"github.com/elesiann/cc-cockpit/internal/hook"
 	"github.com/elesiann/cc-cockpit/internal/install"
 	"github.com/elesiann/cc-cockpit/internal/state"
+	"github.com/elesiann/cc-cockpit/internal/winfocus"
 	"github.com/elesiann/cc-cockpit/internal/workspace"
 )
 
@@ -47,6 +49,10 @@ func main() {
 		os.Exit(runReap(args))
 	case "hook":
 		os.Exit(runHook(args))
+	case "bind-window":
+		os.Exit(runBindWindow(args))
+	case "focus-window":
+		os.Exit(runFocusWindow(args))
 	case "watch":
 		os.Exit(runWatch(args))
 	case "stats":
@@ -653,7 +659,36 @@ func runHook(args []string) int {
 		return 0
 	}
 	_ = state.Append(stateHome, ev)
+
+	// On session start, bind this session to its Windows Terminal window so
+	// `watch` can later raise it. Resolve the pts here (still parented to
+	// claude), then hand the slow capture off to a detached child so we never
+	// block Claude's startup.
+	if event == state.EventSessionStart {
+		maybeBindWindow(sid, stateHome)
+	}
 	return 0
+}
+
+// maybeBindWindow spawns a detached `bind-window` to record the session's
+// Windows Terminal HWND. Best-effort and silent: any failure just means the
+// focus feature won't work for this session. No-op outside WSL + WT.
+func maybeBindWindow(sid, stateHome string) {
+	if !winfocus.Enabled() {
+		return
+	}
+	pts := winfocus.FindSessionPTS()
+	if pts == "" {
+		return
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	cmd := exec.Command(self, "bind-window", "--session", sid, "--state-home", stateHome, "--pts", pts)
+	// New session so the child outlives this short-lived hook process.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	_ = cmd.Start()
 }
 
 // appendSyntheticEnd writes a SessionEnd event tagged synthetic. The reducer's
@@ -664,6 +699,43 @@ func appendSyntheticEnd(stateHome, sid, reason string) error {
 		"session_id": sid,
 		"payload":    map[string]any{"synthetic": true, "reason": reason},
 	})
+}
+
+// ---------- bind-window / focus-window ----------
+
+// runBindWindow records the calling session's Windows Terminal HWND in a
+// sidecar so `watch` can later raise it. Invoked detached by the SessionStart
+// hook; also runnable by hand for debugging. Best-effort: failure is reported
+// on stderr but never escalated.
+func runBindWindow(args []string) int {
+	fs := flag.NewFlagSet("bind-window", flag.ContinueOnError)
+	session := fs.String("session", "", "session id")
+	stateHome := fs.String("state-home", "", "state dir for the session's workspace")
+	pts := fs.String("pts", "", "controlling pts (resolved from ancestry if empty)")
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *session == "" || *stateHome == "" {
+		die("bind-window", "need --session and --state-home")
+	}
+	if err := winfocus.Capture(*stateHome, *session, *pts); err != nil {
+		fmt.Fprintf(os.Stderr, "bind-window: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+// runFocusWindow raises a Windows Terminal window by HWND. Used by hand for
+// debugging; `watch` calls winfocus.Focus in-process.
+func runFocusWindow(args []string) int {
+	if len(args) != 1 {
+		die("focus-window", "usage: focus-window <hwnd>")
+	}
+	if err := winfocus.Focus(args[0]); err != nil {
+		die("focus-window", "%v", err)
+	}
+	return 0
 }
 
 // ---------- watch ----------
